@@ -3,21 +3,28 @@
 `std/websocket`'s write path and a new `Room` for fan-out, measured on Bun's
 [`bench/websocket-server`](https://github.com/oven-sh/bun/tree/main/bench/websocket-server)
 workload: 32 clients, every message echoed to all of them, one round =
-51,200 publishes and 1,638,400 deliveries. 4-core aarch64, median of 5 rounds,
-`nimony c -d:release`. Reproduce with `scripts/run-all.sh`.
+51,200 publishes and 1,638,400 deliveries. 4-core aarch64, `nimony c
+-d:release`, Bun 1.4.4. Reproduce with `scripts/run-interleaved.sh`: the box is
+shared and drifts by ~10%, so Bun and nimony are measured alternately and the
+medians of 3 repetitions are reported. A 3% difference is not a result.
 
 ## Headline
 
 | | before | after | Bun 1.4.4 |
 |---|---|---|---|
-| deliveries/s, 1 client process | 927,248 | **2,623,889** | 2,550,361 |
-| deliveries/s, 4 client processes | 824,417 | **7,395,734** | 7,641,668 |
-| server CPU per round, 1 process | 4.75 s | 0.179 s | 0.101 s |
+| deliveries/s, 1 client process | 927,248 | **2,538,241** | 2,536,238 |
+| deliveries/s, 4 client processes | 824,417 | **7,995,201** | 8,117,359 |
+| server CPU per round, 1 process | 4.75 s | 0.195 s | 0.101 s |
 | `io_uring_enter` per round | 1,478,997 | **3,558** | 49,765 `sendto` |
 
-2.8× more throughput at one client process and 9.0× at four, at parity with
-Bun at both splits (interleaved, 10 rounds, medians; a 3% difference is noise on
-this box) and ~1.4× Bun's server CPU instead of 15×.
+2.7× more throughput at one client process and 9.7× at four, at parity with Bun
+at both splits (+0.1% and −1.5%), on ~1.3× Bun's server CPU instead of 15×.
+
+The runtime underneath was part of the work: the ring's op queue and the pool's
+task queue both took a `SysLock` per operation. They are now a same-thread ring
+(the owner is the only producer *and* the only consumer of its lane) and a set
+of Chase-Lev work-stealing deques, which is **−42% instructions per echoed
+message** (6,497 → 3,736, callgrind) and removes the mutexes from the profile.
 
 ## Where it came from, in order
 
@@ -66,17 +73,23 @@ per round.
 
 | | 1 client process | 4 client processes | server CPU per message |
 |---|---|---|---|
-| Bun | 294,557 msg/s | 961,272 msg/s | 0.68 µs |
-| nimony | **296,982 msg/s** | **617,544 msg/s** | 1.37 µs |
+| Bun | 311,316 msg/s | 1,186,888 msg/s | 0.72 µs |
+| nimony | **313,275 msg/s** | **675,817 msg/s** | 1.09 µs |
 
-Level with Bun at one client process, 60% at four, on 2.6× Bun's CPU per
-message. With 2000-byte messages (per-message cost spread over 133× more bytes)
-nimony is ahead: 160,921 against 143,880 msg/s.
+Level with Bun at one client process (+0.6%), 57% at four, on 1.5× Bun's CPU
+per message (it was 2.6×). With 2000-byte messages (per-message cost spread over
+133× more bytes) nimony is ahead: 169,192 against 151,022 msg/s.
 
-What is left per message is the runtime, not the socket. A callgrind profile over 19,200 real messages puts ~52% of the echo server's
-CPU in the pool (`submit` 17%, stripe mutexes 12%, `drainOnce` 8%, per-poll
-guards 10%), 11% in allocation and ~3% in the frame codec: the echo is
-latency- and scheduler-bound, not bound by the socket path.
+The four-process row is no longer CPU-bound: the server spends 0.056 s of CPU
+on a 76 ms round, so it is idle a third of the time. What Bun wins there is the
+number of I/O round trips per message — one `epoll_wait` for many ready sockets
+against one ring submission and one completion per read and per write. That is
+the next thing to attack, and it is in the I/O design, not the scheduler.
+
+Trampolining a chain inline (running a continuation's next steps on the same
+worker instead of re-queueing them) cuts the echo's CPU by 12% and its
+throughput by 13%: a worker cannot poll its own io_uring lane while it runs, so
+every deferred poll is deferred latency. Reverted.
 
 ## What is left
 

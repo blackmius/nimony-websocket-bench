@@ -1,0 +1,1 @@
+echo-nimony-pin        4 client proc(s)  round=   80.8 ms  aggregate=   643343 msg/s  server_cpu=  0.80s  alive=yes

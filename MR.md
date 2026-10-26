@@ -4,12 +4,17 @@
 
 A chat-room server written on `std/websocket` — the workload of Bun's
 [`bench/websocket-server`](https://github.com/oven-sh/bun/tree/main/bench/websocket-server)
-— moved **927k → 2.48M** fan-out messages/s on a 4-core aarch64 box with the
-existing pair API, and **2.62M → 3.90M** with four client processes once the
-new `Room` does the fan-out. Server CPU per round went from 4.75 s to 1.40 s
-(pair API) and 0.26 s (room); `io_uring_enter` calls per round from 1,478,997
-to 45,595 and 3,261. Bun's own server, same client, same machine: 2.45M and
-7.41M, at 0.53 s and 0.45 s.
+— moved **927k → 2.54M** fan-out messages/s on a 4-core aarch64 box, and
+**824k → 8.00M** with four client processes. Server CPU per round went from
+4.75 s to 0.195 s; `io_uring_enter` calls per round from 1,478,997 to 3,558.
+Bun's own server, same client, same machine, measured interleaved: 2.54M and
+8.12M, at 0.101 s and 0.089 s per round.
+
+The write path and the fan-out are most of that, but not all of it: the runtime
+underneath took a `SysLock` per queued task and per submitted I/O op, and the
+scheduler was **52% of the echo server's CPU**. Both queues are lock-free now
+(a same-thread ring for a lane's ops, Chase-Lev work-stealing deques for
+tasks), which is −42% instructions per echoed message.
 
 Four things were in the way, all in the write path:
 
@@ -36,13 +41,16 @@ against the RFC's own spelling).
 
 Workload: 32 clients, each sends 1600 messages, every message is echoed to all
 32 clients. One round is 51,200 publishes and 1,638,400 frame deliveries.
-Median of 5 rounds, `nimony c -d:release`, 4-core aarch64.
+`nimony c -d:release`, 4-core aarch64. The box is shared and drifts by ~10%
+between runs, so Bun and nimony are measured **interleaved** (Bun, nimony, Bun,
+nimony), 10 rounds per configuration, 3 repetitions each, medians reported; a
+3% difference is not a result.
 
 | | before | after (pair API) | after (`Room`) | Bun 1.4.4 |
 |---|---|---|---|---|
-| deliveries/s, 1 client process | 927,248 | 1,626,234 | **2,623,889** | 2,550,361 |
-| deliveries/s, 4 client processes | 824,417 | 1,792,313 | **7,395,734** | 7,641,668 |
-| server CPU per round, 1 process | 4.75 s | 2.85 s | 0.179 s | 0.101 s |
+| deliveries/s, 1 client process | 927,248 | 1,626,234 | **2,538,241** | 2,536,238 |
+| deliveries/s, 4 client processes | 824,417 | 1,792,313 | **7,995,201** | 8,117,359 |
+| server CPU per round, 1 process | 4.75 s | 2.85 s | 0.195 s | 0.101 s |
 | `io_uring_enter` per round | 1,478,997 | 45,595 | **3,558** | 49,765 `sendto` |
 
 Per change, each measured on its own with the pair API at one client process:
@@ -167,9 +175,38 @@ one op, and waiting for that op is what lets the next thirty queue up. `flush`
 does not control *when* the submit happens (that is the loop's business); it
 controls *how much* is in the buffer when the op is created.
 
-The hook was removed; the change set is what measured best. (In a `Room` the
+The hook was removed; the change set is what measured best.
+
+**Trampolining a chain inline.** `drainOnce` re-submits a continuation that
+yields more work, so a chain's next step goes back through the queue — ~20
+submits per echoed message. Running the chain inline until it parks cuts that to
+~0.3 and 12% of the echo's CPU, and costs 13% of its throughput (309k → 269k at
+one client process): a worker cannot poll its own io_uring lane while it runs,
+so every deferred poll is deferred latency, and the echo is latency-bound. The
+room is neutral. Reverted. (In a `Room` the
 batch comes from the room's queue instead, which is why the room does not need
 the per-frame flush at all.)
+
+### `lib/std/threadpool.nim`, `lib/std/ioring/core/backend.nim`
+
+* A lane's deferred ops have one consumer (that lane's `poll`) and, for a
+  worker, one producer — the same thread, since a worker submits its ops from
+  the continuations it runs. So `gOpQueues[lane]` is an `OpQueue` whose
+  owner-side queue is a plain `LocalRing`: no lock, no atomics. The locked
+  `FifoStripe` stays for the two multi-producer cases (the trailing lane shared
+  by every non-worker thread, and iocp's cross-lane routing).
+* `localQueues` is a set of Chase-Lev work-stealing deques: the owner pushes at
+  `bottom` (its only writer), and the owner and thieves alike take from `top`
+  with one compare-exchange per batch, so `BulkSize` tasks cost one atomic
+  operation. A push from a thread that is not the owner still takes the locked
+  FIFO.
+* `deliver` submits a resumed chain without an `fd` hint, so it is staged on the
+  polling lane instead of being pushed into another worker's stripe.
+* The per-worker counters are behind `-d:threadpoolMetrics`; without it
+  `countMetric` compiles to nothing and `workerMetrics` is never allocated.
+  They were on the hottest lines and nothing in the library reads them.
+* Instructions per echoed message (callgrind, same workload): 6,497 with the
+  locked queues, 4,082 with the `LocalRing` op queue, 3,736 with the deques.
 
 ## Testing
 
@@ -179,10 +216,9 @@ the per-frame flush at all.)
   handshake, the three length forms, fragments, pings, and the protocol
   violations a server has to refuse.
 * A plain echo server (`src/echoserver.nim`, no room at all) is at
-  297k messages/s against Bun's 283k with one client
-  process, and 536k against 855k with four, on
-  1.6× Bun's CPU per message. 15 messages per `io_uring_enter`,
-  against Bun's 33 per `sendto`.
+  313k messages/s against Bun's 311k with one client process, and 676k against
+  1.19M with four, on 1.5× Bun's CPU per message. 15 messages per
+  `io_uring_enter`, against Bun's 33 per `sendto`.
 * `tests/nimony/websocket/troom.nim` (new) — a room over a real socket:
   `ws.publish` reaches every member including the sender, `ws.send` reaches one
   connection only, a publish to a parent topic reaches the topics below it and
