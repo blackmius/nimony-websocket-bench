@@ -99,15 +99,24 @@ proc leave(id: int) =
 
 proc writerLoop(rx: sink Receiver[OutMsg]; wr: sink WebSocketWriter) {.passive.} =
   ## The only place this connection's socket is written to.
+  ##
+  ## Frames go out with `flush = false`, and the flush happens when the outbox
+  ## runs dry, just before the chain parks on it: one syscall for a burst of
+  ## frames instead of one per frame. The wait for that syscall is also what
+  ## lets the next burst form — a writer that never waits keeps pace with the
+  ## publisher and would write one frame per op.
   var m = OutMsg()
   while true:
     try:
-      if not rx.recv(m): return
+      if not rx.tryRecv(m):
+        # Nothing left to write: what is buffered is owed to the peer now.
+        wr.flush()
+        if not rx.recv(m): return
       case m.kind
-      of okText: wr.send(mkText, m.text)
-      of okPong: wr.send(mkPong, m.text)
+      of okText: wr.send(mkText, m.text, flush = false)
+      of okPong: wr.send(mkPong, m.text, flush = false)
       of okClose:
-        wr.close(1000)
+        wr.close(1000)          # flushes what came before it, then the close
         return
     except ErrorCode:
       wr.abort()
