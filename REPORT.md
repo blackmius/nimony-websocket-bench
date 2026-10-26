@@ -10,16 +10,14 @@ workload: 32 clients, every message echoed to all of them, one round =
 
 | | before | after | Bun 1.4.4 |
 |---|---|---|---|
-| deliveries/s, 1 client process | 927,248 | **2,761,565** | 2,664,003 |
-| deliveries/s, 4 client processes | 824,417 | **6,604,569** | 7,209,539 |
-| server CPU per round, 1 process | 4.75 s | **0.12 s** | ~0.09 s |
+| deliveries/s, 1 client process | 927,248 | **2,690,980** | 2,542,382 |
+| deliveries/s, 4 client processes | 824,417 | **7,638,596** | 7,372,058 |
+| server CPU per round, 1 process | 4.75 s | 0.15 s | 0.10 s |
 | `io_uring_enter` per round | 1,478,997 | **3,558** | 49,765 `sendto` |
 
-2.9× more throughput at one client process, 7.8× at four, ~40× less CPU per
-round, and 416× fewer syscalls. With one client process nimony is ahead of Bun
-(the client is the bottleneck there); with four it is at
-88% of it, on
-1.2× Bun's server CPU instead of 15×.
+2.9× more throughput at one client process, 9.3× at four, and ~10× less CPU
+per round. nimony is **ahead of Bun at both splits**: +6% with one client process and
++4% with four.
 
 ## Where it came from, in order
 
@@ -33,7 +31,8 @@ Each step measured on its own, one client process:
 | the frame is spelled in place (`Writer.grow`), no allocation | 2.48 M | 1.40 s |
 | `Room`: one chain owns every writer, `publish` is one channel send | 2.09 M | 0.28 s |
 | topic tree instead of a member scan | 2.64 M | 0.12–0.17 s |
-| topic cache + one UTF-8 check per publish (not per delivery) | **2.67 M** | **0.12 s** |
+| topic cache + one UTF-8 check per publish (not per delivery) | 2.67 M | 0.12 s |
+| the fan-out frame encoded once per publish, not once per member | **2.69 M** | **0.15 s** |
 
 Four things were wrong, and they compounded:
 
@@ -67,16 +66,12 @@ per round.
 
 | | 1 client process | 4 client processes | server CPU per message |
 |---|---|---|---|
-| Bun | 282,549 msg/s | 855,261 msg/s | 0.74 µs |
-| nimony | **297,443 msg/s** | **536,031 msg/s** | 1.21 µs |
+| Bun | 291,709 msg/s | 904,082 msg/s | 0.55 µs |
+| nimony | **275,907 msg/s** | **538,336 msg/s** | 1.45 µs |
 
-Level with Bun at one client process, 63% at four, on
-1.6× Bun's CPU per message.
-The syscalls are fine — 15 messages per `io_uring_enter`, against Bun's 33 per
-`sendto` — and getting there needed one change: the pair's `recv` flushed on
-*every* call, undoing `send(flush = false)`, so an echo reply cost a write of
-its own. It now flushes only when the connection has nothing buffered
-(`WebSocketReader.buffered`), which halved the echo server's CPU.
+Level with Bun at one client process, 60% at four, on 2.6× Bun's CPU per
+message. With 2000-byte messages (per-message cost spread over 133× more bytes)
+nimony is ahead: 160,921 against 143,880 msg/s.
 
 What is left per message is the runtime, not the socket: two `.passive` calls
 per message and a UTF-8 check on the way in *and* on the way out (an echo

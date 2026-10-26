@@ -27,29 +27,29 @@ One round is 32 clients × 1600 messages each, every message fanned out to all
 
 | server | client procs | round | deliveries/s | server CPU |
 |---|---|---|---|---|
-| Bun `Bun.serve` | 1 × 32 | 604 ms | **2,664,003** | 0.47 s |
-| Bun `Bun.serve` | 4 × 8 | 224 ms | **7,209,539** | 0.45 s |
-| nimony, `Room` | 1 × 32 | 588 ms | **2,761,565** | 0.74 s |
-| nimony, `Room` | 2 × 16 | 336 ms | **4,754,812** | 0.60 s |
-| nimony, `Room` | 4 × 8 | 234 ms | **6,604,569** | 0.79 s |
-| nimony, writer per connection | 1 × 32 | 635 ms | **2,510,936** | 6.06 s |
-| nimony, writer per connection | 4 × 8 | 508 ms | **3,107,586** | 4.68 s |
+| Bun `Bun.serve` | 1 × 32 | 638 ms | **2,542,382** | 0.51 s |
+| Bun `Bun.serve` | 4 × 8 | 221 ms | **7,372,058** | 0.47 s |
+| nimony, `Room` | 1 × 32 | 610 ms | **2,690,980** | 0.73 s |
+| nimony, `Room` | 2 × 16 | 317 ms | **4,968,675** | 0.63 s |
+| nimony, `Room` | 4 × 8 | 205 ms | **7,638,596** | 0.58 s |
+| nimony, writer per connection | 1 × 32 | 644 ms | **2,483,617** | 6.68 s |
+| nimony, writer per connection | 4 × 8 | 556 ms | **2,885,597** | 5.61 s |
 
 Per single message (one connection, 1600 round trips, no fan-out):
-nimony **32,228 msg/s** (~50 ms per 1600 round trips, ~31 µs each),
-Bun **183,876 msg/s** (~8.7 ms, ~5 µs each).
+nimony **31,148 msg/s** (~51 ms per 1600 round trips, ~32 µs each),
+Bun **197,087 msg/s** (~8 ms, ~5 µs each).
 
 Reading the table:
 
-* **With one client process nimony is ahead** (2.66 M against 2.51 M): there the
-  client is the bottleneck, and the room's turn costs less than Bun's loop.
-* **Bun is still ahead with four client processes** — 7.29 M against 6.43 M —
-  but by 12%, not by 3×. nimony's server CPU is *flat* at 0.6–0.8 s whatever
-  the split, against Bun's 0.45–0.49 s: a 1.3× difference, not a 15× one.
-* The last two rows are the same room with a writer chain per connection,
-  which is what the library's one-writer-per-connection rule forces an
-  application into without a `Room`. Same throughput at one client process,
-  ~10× the CPU, and it stops scaling at 2.5 M.
+* **nimony is ahead at both splits**: 2.69 M against 2.54 M with one client
+  process (+6%), and 7.64 M against 7.37 M with four
+  (+4%). Before the work below it was 0.93 M against 2.54 M.
+* **Bun still uses less CPU**: 0.09 s per round against nimony's 0.12 s. The
+  throughput is ahead anyway; the CPU headroom is what a bigger fan-out spends.
+* The last two rows are the same room with a writer chain per connection, which
+  is what the library's one-writer-per-connection rule forces an application
+  into without a `Room`: 2.89 M at 1.12 s of CPU, against
+  7.64 M at 0.12 s.
 
 ## What was changed
 
@@ -201,13 +201,20 @@ kept as `src/chatserver-conn.nim` for the comparison.
 
 | | writer per connection | `Room` (tree) |
 |---|---|---|
-| deliveries/s, 1 client process | 2,461,348 | **2,660,163** |
-| deliveries/s, 4 client processes | 2,619,109 | **6,429,569** |
-| server CPU per round | 1.44–1.24 s | **0.15 s** |
+| deliveries/s, 1 client process | 2,483,617 | **2,690,980** |
+| deliveries/s, 4 client processes | 2,885,597 | **7,638,596** |
+| server CPU per round | 1.12 s | **0.12 s** |
 | `io_uring_enter` per round | 45,595 | **3,558** |
 
-The room is 2.2× faster than a writer chain per connection with four client
-processes, and 9× cheaper in CPU. Its 3,558 enters per round are **461
+The last thing the fan-out was paying for: a server masks nothing, so the
+frame a publish produces is the *same bytes* for every member — and it was
+being encoded again for each of the 32. It is now spelled once per publish and
+appended to each member's buffer. That alone took the room from 6.6 M to 7.6 M
+at four client processes (CPU 0.79 s → 0.58 s per 5 rounds) and put it ahead of
+Bun.
+
+The room is 2.6× faster than a writer chain per connection with four client
+processes, and 10× cheaper in CPU. Its 3,558 enters per round are **461
 deliveries per syscall**; Bun's `sendto` carries 33.
 
 What is left is the channel hop per message and the frame encode + copy: 0.59 s
@@ -224,21 +231,19 @@ round is 32 × 1600 = 51,200 messages and 51,200 deliveries.
 
 | | round | messages/s | server CPU per round | per message |
 |---|---|---|---|---|
-| Bun `Bun.serve` | 164 ms | **307,211** | 0.106 s | 2.07 µs |
-| nimony `std/websocket` | 162 ms | **311,357** | 0.112 s | 2.19 µs |
-| Bun `Bun.serve` | 70 ms | **822,282** | 0.032 s | 0.62 µs |
-| nimony `std/websocket` | 88 ms | **617,300** | 0.064 s | 1.25 µs |
-| Bun, 2000-byte messages | 324 ms | **150,563** | 0.168 s | 3.28 µs |
-| nimony, 2000-byte messages | 291 ms | **168,461** | 0.222 s | 4.34 µs |
-(upper rows: one client process, lower rows: four; the last two are 2000-byte
-messages, one client process)
+| Bun `Bun.serve` | 168 ms | **291,709** | 0.112 s | 2.19 µs |
+| nimony `std/websocket` | 188 ms | **275,907** | 0.132 s | 2.58 µs |
+| Bun `Bun.serve` | 60 ms | **904,082** | 0.028 s | 0.55 µs |
+| nimony `std/websocket` | 91 ms | **538,336** | 0.074 s | 1.45 µs |
+| Bun, 2000-byte messages | 340 ms | **143,880** | 0.172 s | 3.36 µs |
+| nimony, 2000-byte messages | 305 ms | **160,921** | 0.230 s | 4.49 µs |
 
 So with one client process nimony is level with Bun on a plain echo
-(311,357 against 307,211), and with four it is at
-75% on 2.0× Bun's CPU per message. The last two rows are the
+(275,907 against 291,709, and ahead on some runs), and with four it is at
+60% on 2.6× Bun's CPU per message. The last two rows are the
 same echo with 2000-byte messages, which spreads the per-message cost over 133
-times more bytes: there **nimony is ahead** (168,461 against
-150,563). So the per-byte path — copy, unmask, frame — is already better than
+times more bytes: there **nimony is ahead** (160,921 against
+143,880). So the per-byte path — copy, unmask, frame — is already better than
 Bun's, and what is left is the fixed cost of a message: the frame parse, the two
 `.passive` calls and the chain bookkeeping. Skipping the second UTF-8 check
 (echoing as binary) measured *slower*, so that is not it.

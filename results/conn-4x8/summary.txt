@@ -1,1 +1,1 @@
-conn-4x8               4 client proc(s)  round=  507.9 ms  aggregate=  3107586 msg/s  server_cpu=  4.68s  alive=yes
+conn-4x8               4 client proc(s)  round=  555.8 ms  aggregate=  2885597 msg/s  server_cpu=  5.61s  alive=yes
