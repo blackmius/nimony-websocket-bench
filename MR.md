@@ -40,10 +40,10 @@ Median of 5 rounds, `nimony c -d:release`, 4-core aarch64.
 
 | | before | after (pair API) | after (`Room`) | Bun 1.4.4 |
 |---|---|---|---|---|
-| deliveries/s, 1 client process | 927,248 | 2,514,840 | 2,094,745 | 2,460,107 |
-| deliveries/s, 4 client processes | 824,417 | 2,683,270 | **3,513,242** | 7,472,494 |
-| server CPU per round, 1 process | 4.75 s | 1.40 s | 0.28 s | ~0.09 s |
-| `io_uring_enter` per round | 1,478,997 | 45,595 | **3,261** | 49,765 `sendto` |
+| deliveries/s, 1 client process | 927,248 | 2,524,746 | **2,638,737** | 2,541,884 |
+| deliveries/s, 4 client processes | 824,417 | 2,449,155 | **6,286,334** | 7,291,716 |
+| server CPU per round, 1 process | 4.75 s | 1.40 s | 0.12–0.17 s | ~0.09 s |
+| `io_uring_enter` per round | 1,478,997 | 45,595 | **3,296** | 49,765 `sendto` |
 
 Per change, each measured on its own with the pair API at one client process:
 
@@ -100,6 +100,18 @@ never had more than one was that the writer waited for each write to complete.
   isolated rooms, and `Room.publish` is the server-initiated form. `publish`
   parks when the room's queue is full: that is the backpressure, and it is per
   room rather than per member.
+
+  Topics are **paths**, as in uWebSockets — `"chat"`, `"chat/room1"`,
+  `"chat/room1/users"` — and a publish reaches the topic *and everything below
+  it*. The room keeps a tree of segments instead of a list of members to scan,
+  so a publish walks the path once and then the subscribers hanging off the
+  node it lands on; a member that is in both a topic and one of its parents is
+  reached once, by a per-publish generation. That is where most of the room's
+  win came from even with a single topic: the flat version compared the
+  published topic against every member's topic string on every delivery
+  (1.6 M string compares per round), the tree compares segments once per
+  publish and an integer per delivery. Round time 790 ms → 611 ms at one client
+  process, 458 ms → 254 ms at four.
 
 ### `lib/std/streamio.nim`
 
@@ -161,8 +173,10 @@ the per-frame flush at all.)
   violations a server has to refuse.
 * `tests/nimony/websocket/troom.nim` (new) — a room over a real socket:
   `ws.publish` reaches every member including the sender, `ws.send` reaches one
-  connection only, a ping is answered through the room, a member leaving does
-  not take the room with it, and the room answers the peer's close.
+  connection only, a publish to a parent topic reaches the topics below it and
+  a member in both gets the line once, a publish to a child reaches only its
+  subtree, a member leaving does not take the room with it, and the room
+  answers the peer's close.
 * `tests/nimony/http` (15/15), `tests/nimony/streams` (4/4) — `streamio` and
   `channels` are under both.
 * `tests/nimony/stdlib/tall.nim` — every module in `lib/std` still compiles
@@ -193,9 +207,9 @@ reproduces the table).
   plus "wait for the drain". The deferred-submit variant measured above is
   exactly the first half, and it lost because it dropped the second; with the
   wait kept, a turn's flushes would overlap instead of serialising.
-* `Room` scans its member list to find a member and checks the topic of every
-  member on a publish. Fine for a chat room, wrong for ten thousand
-  subscribers; that wants an index (and a topic set per member).
+* `publish` walks the topic path with a `substr` per segment. Fine for
+  chat-shaped topics, wasteful for a hot loop over deep paths; caching the node
+  in the subscription would do.
 * A client that disconnects still kills a server that does not install
   `SIG_IGN` for `SIGPIPE`: the runtime has no handler and the write path does
   not pass `MSG_NOSIGNAL` (the flag is defined in `lib/std/posix/io_uring.nim`

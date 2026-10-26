@@ -27,16 +27,16 @@ One round is 32 clients × 1600 messages each, every message fanned out to all
 
 | server | client procs | round | deliveries/s | server CPU |
 |---|---|---|---|---|
-| Bun `Bun.serve` | 1 × 32 | 645 ms | **2,460,107** | 0.50 s |
-| Bun `Bun.serve` | 4 × 8 | 209 ms | **7,472,494** | 0.34 s |
-| nimony, `Room` | 1 × 32 | 790 ms | **2,094,745** | 1.45 s |
-| nimony, `Room` | 2 × 16 | 540 ms | **2,977,625** | 1.40 s |
-| nimony, `Room` | 4 × 8 | 458 ms | **3,513,242** | 1.42 s |
-| nimony, writer per connection | 1 × 32 | 617 ms | **2,514,840** | 7.00 s |
-| nimony, writer per connection | 4 × 8 | 619 ms | **2,683,270** | 5.57 s |
+| Bun `Bun.serve` | 1 × 32 | 631 ms | **2,541,884** | 0.50 s |
+| Bun `Bun.serve` | 4 × 8 | 225 ms | **7,291,716** | 0.45 s |
+| nimony, `Room` | 1 × 32 | 611 ms | **2,638,737** | 0.86 s |
+| nimony, `Room` | 2 × 16 | 370 ms | **4,380,096** | 0.69 s |
+| nimony, `Room` | 4 × 8 | 254 ms | **6,286,334** | 0.62 s |
+| nimony, writer per connection | 1 × 32 | 640 ms | **2,524,746** | 8.14 s |
+| nimony, writer per connection | 4 × 8 | 694 ms | **2,449,155** | 6.98 s |
 
 The Bun 4×8 row is the noisiest (6.4–7.6 M across runs on this shared box);
-nimony's 4×8 row is 3.5–4.2 M.
+nimony's 4×8 row is 5.9–6.3 M.
 
 Per single message (one connection, 1600 round trips, no fan-out):
 nimony **32,228 msg/s** (~50 ms per 1600 round trips, ~31 µs each),
@@ -44,18 +44,15 @@ Bun **183,876 msg/s** (~8.7 ms, ~5 µs each).
 
 Reading the table:
 
-* **With one client process the two are level** (2.11–2.48 M against 2.45 M):
-  there the client is the bottleneck, not the server.
-* **Bun still scales further** — 7.5 M against 3.5–4.2 M with four client
-  processes — but nimony's server CPU is now *flat* at 1.4 s whatever the
-  split: it stopped being the limit. The remaining gap is a ~3× CPU-per-
-  delivery difference (0.34 s against 1.42 s for the same 8.2 M deliveries),
-  which on four cores is the difference between leaving the clients 3.9 cores
-  and leaving them 3.6.
+* **With one client process nimony is ahead** (2.64 M against 2.54 M): there the
+  client is the bottleneck, and the room's turn costs less than Bun's loop.
+* **Bun is still ahead with four client processes** — 7.29 M against 6.29 M —
+  but by 16%, not by 3×. nimony's server CPU is *flat* at 0.6–0.9 s whatever
+  the split, against Bun's 0.45–0.50 s: a 1.4× difference, not a 15× one.
 * The last two rows are the same room with a writer chain per connection,
   which is what the library's one-writer-per-connection rule forces an
   application into without a `Room`. Same throughput at one client process,
-  5× the CPU, and it stops scaling at 2.7 M.
+  ~10× the CPU, and it stops scaling at 2.5 M.
 
 ## What was changed
 
@@ -184,26 +181,41 @@ they are not given one, so topics are just names, as in Bun. A server that
 wants isolated rooms makes one with `newRoom` and passes it:
 `ws.subscribe(room, "chat")`.
 
+Topics are **paths**, as in uWebSockets: `"chat"`, `"chat/room1"`,
+`"chat/room1/users"`. Publishing to a topic reaches its subscribers *and* the
+subscribers of everything below it, so `publish("chat", ...)` is the whole room
+and `publish("chat/room1", ...)` one part of it. The room keeps a tree of topic
+segments rather than a list of members to scan: a publish walks the path once
+and then the subscribers that hang off the node it lands on. A member that is
+in both a topic and one of its parents is reached twice by one walk, so each
+publish carries a generation and a member that has already had it is skipped.
+
+That is not only a scaling argument — it is where most of the win came from
+here, with a *single* topic. The flat version compared the published topic
+against every member's topic string on every delivery (1.6 M string compares
+per round, ~120 ns each); the tree compares node segments once per publish and
+an integer per delivery. The round time fell from 790 ms to 611 ms at one
+client process, and from 458 ms to 254 ms at four.
+
 The room writes into every member's buffer with `flush = false` and flushes
 each member once per turn, so a message costs one channel send and one buffer
 append per member. That is `src/chatserver.nim`; the per-connection server is
 kept as `src/chatserver-conn.nim` for the comparison.
 
-| | writer per connection | `Room` |
+| | writer per connection | `Room` (tree) |
 |---|---|---|
-| deliveries/s, 1 client process | 2,514,840 | 2,094,745 |
-| deliveries/s, 4 client processes | 2,683,270 | **3,513,242** |
-| server CPU per round | 1.11–1.40 s | **0.28–0.29 s** |
-| `io_uring_enter` per round | 45,595 | **3,261** |
+| deliveries/s, 1 client process | 2,524,746 | **2,638,737** |
+| deliveries/s, 4 client processes | 2,449,155 | **6,286,334** |
+| server CPU per round | 1.40–1.63 s | **0.12–0.17 s** |
+| `io_uring_enter` per round | 45,595 | **3,296** |
 
-The room gives up a little latency at one client process (the fan-out is
-serialised, so the last member in a turn is written after the first) and wins
-1.3–1.5× throughput and 5× CPU once the clients can push. Its 3,261 enters per
-round are **502 deliveries per syscall**; Bun's `sendto` carries 33.
+The room is 2.6× faster than a writer chain per connection with four client
+processes, and 10× cheaper in CPU. Its 3,296 enters per round are **497
+deliveries per syscall**; Bun's `sendto` carries 33.
 
-What is left after that is the ~3× CPU-per-delivery difference: the frame
-encode + copy and the one channel hop per message. It no longer limits
-throughput on this box.
+What is left is the channel hop per message and the frame encode + copy: 0.62 s
+of server CPU per 5 rounds against Bun's 0.45 s. It no longer limits throughput
+on this box.
 
 ## What is left
 
@@ -213,13 +225,13 @@ throughput on this box.
   plus "wait for the drain". The deferred-submit variant
   [rejected above](#4-what-was-tried-and-rejected-submit-at-the-end-of-the-cycle)
   is exactly the first half; with the wait kept, a turn's flushes would overlap
-  instead of serialising. That is the next thing to measure.
+  instead of serialising.
 * The channel hop per message: one ticket-lock round trip and a 24-byte copy.
   Batching a reader's lines before handing them to the room would cut it by the
   batch size, at the cost of an allocation per batch.
-* `Room` finds a member by scanning its list, and a publish checks the topic of
-  every member. Fine for a chat room, wrong for ten thousand subscribers and
-  many topics; that wants an index.
+* `publish` walks the topic path with `substr` per segment, and a member's
+  subscription is a `seq[string]` — fine for chat-shaped topics, wasteful for
+  a hot loop over deep paths. Caching the node in the subscription would do.
 
 ## Other things found while writing the server
 

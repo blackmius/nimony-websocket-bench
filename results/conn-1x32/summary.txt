@@ -1,1 +1,1 @@
-conn-1x32              1 client proc(s)  round=  617.4 ms  aggregate=  2514840 msg/s  server_cpu=  7.00s  alive=yes
+conn-1x32              1 client proc(s)  round=  640.1 ms  aggregate=  2524746 msg/s  server_cpu=  8.14s  alive=yes
