@@ -36,7 +36,7 @@ One round is 32 clients × 1600 messages each, every message fanned out to all
 | nimony, writer per connection | 4 × 8 | 571 ms | **2,729,327** | 5.59 s |
 
 The Bun 4×8 row is the noisiest (6.4–7.6 M across runs on this shared box);
-nimony's 4×8 row is 6.6–6.8 M.
+nimony's 4×8 row is 6.4–6.8 M across runs.
 
 Per single message (one connection, 1600 round trips, no fan-out):
 nimony **32,228 msg/s** (~50 ms per 1600 round trips, ~31 µs each),
