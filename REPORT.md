@@ -10,8 +10,8 @@ workload: 32 clients, every message echoed to all of them, one round =
 
 | | before | after | Bun 1.4.4 |
 |---|---|---|---|
-| deliveries/s, 1 client process | 927,248 | **2,665,439** | 2,515,891 |
-| deliveries/s, 4 client processes | 824,417 | **6,689,450** | 7,353,584 |
+| deliveries/s, 1 client process | 927,248 | **2,687,542** | 2,527,099 |
+| deliveries/s, 4 client processes | 824,417 | **6,378,984** | 7,559,182 |
 | server CPU per round, 1 process | 4.75 s | **0.12 s** | ~0.09 s |
 | `io_uring_enter` per round | 1,478,997 | **3,558** | 49,765 `sendto` |
 
@@ -58,6 +58,27 @@ came with a *single* topic: the flat version compared the published topic
 against every member's topic string on every delivery — 1.6 M string compares
 per round, ~120 ns each — and the tree compares an integer. Round time fell
 from 790 ms to 611 ms at one client process and from 458 ms to 254 ms at four.
+
+## Plain echo (no fan-out)
+
+Same client, a server that only echoes: 51,200 messages and 51,200 deliveries
+per round.
+
+| | 1 client process | 4 client processes | server CPU per message |
+|---|---|---|---|
+| Bun | 290,701 msg/s | 742,101 msg/s | 0.66 µs |
+| nimony | **287,171 msg/s** | **562,025 msg/s** | 1.3 µs |
+
+Level with Bun at one client process, 76% at four, on 2× Bun's CPU per message.
+The syscalls are fine — 15 messages per `io_uring_enter`, against Bun's 33 per
+`sendto` — and getting there needed one change: the pair's `recv` flushed on
+*every* call, undoing `send(flush = false)`, so an echo reply cost a write of
+its own. It now flushes only when the connection has nothing buffered
+(`WebSocketReader.buffered`), which halved the echo server's CPU.
+
+What is left per message is the runtime, not the socket: two `.passive` calls
+per message and a UTF-8 check on the way in *and* on the way out (an echo
+validates the same bytes twice).
 
 ## What is left
 

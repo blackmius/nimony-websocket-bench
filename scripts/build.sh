@@ -25,4 +25,5 @@ mkdir -p "$ROOT/bin"
 # unoptimised build would measure the C compiler's -O1, not the design.
 "$NIMONY/bin/nimony" c -d:release -o:"$ROOT/bin/chatserver" "$@" "$ROOT/src/chatserver.nim"
 "$NIMONY/bin/nimony" c -d:release -o:"$ROOT/bin/chatserver-conn" "$@" "$ROOT/src/chatserver-conn.nim"
-echo "built $ROOT/bin/chatserver and $ROOT/bin/chatserver-conn"
+"$NIMONY/bin/nimony" c -d:release -o:"$ROOT/bin/echoserver" "$@" "$ROOT/src/echoserver.nim"
+echo "built $ROOT/bin/chatserver, bin/chatserver-conn and bin/echoserver"

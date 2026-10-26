@@ -1,0 +1,1 @@
+echo-bun-4x8           4 client proc(s)  round=   63.8 ms  aggregate=   742101 msg/s  server_cpu=  0.17s  alive=yes

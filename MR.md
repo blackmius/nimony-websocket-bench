@@ -77,8 +77,11 @@ never had more than one was that the writer waited for each write to complete.
 * `send` takes `flush = true`. With `flush = false` the frame only joins the
   connection's buffer; a run of frames then reaches the kernel as one write.
   `flush` is exposed on `WebSocketWriter` and `WebSocket`. The pair's `recv`
-  flushes before it parks, so a writer that also reads can never leave a frame
-  behind and wait for an answer to something the peer has not been told.
+  flushes before it parks — but only when the connection has nothing buffered
+  (`WebSocketReader.buffered`), which is when the wait really happens. While
+  frames are still coming, the replies ride along with the next write; that is
+  what lets an echo server answer a burst with one write instead of one per
+  message, and it halved its CPU.
 * **`Room`** — publish/subscribe, and the only place in the module that writes
   to more than one connection. The connection joins it, so the handler stays on
   the pair API:
@@ -173,6 +176,10 @@ the per-frame flush at all.)
 * `tests/nimony/websocket/tserver.nim` — 31 cases over a real socket: the
   handshake, the three length forms, fragments, pings, and the protocol
   violations a server has to refuse.
+* A plain echo server (`src/echoserver.nim`, no room at all) is at 287k
+  messages/s against Bun's 291k with one client process, and 562k against 742k
+  with four, on 2× Bun's CPU per message. 15 messages per `io_uring_enter`,
+  against Bun's 33 per `sendto`.
 * `tests/nimony/websocket/troom.nim` (new) — a room over a real socket:
   `ws.publish` reaches every member including the sender, `ws.send` reaches one
   connection only, a publish to a parent topic reaches the topics below it and
@@ -195,7 +202,8 @@ reproduces the table).
 * `frameHeader`, `writeProto` and every other existing public signature are
   unchanged.
 * New API only: `Writer.grow`, `Reader.tryReadRecord`, `Receiver.tryRecv`,
-  `WebSocketWriter.flush`, `WebSocket.flush`, the `flush` parameter on `send`,
+  `WebSocketReader.buffered`, `WebSocketWriter.flush`, `WebSocket.flush`, the
+  `flush` parameter on `send`,
   and `Room` with `newRoom`, `defaultRoom`, `Room.publish`, `Room.addTopic`,
   `Room.dropTopic`, plus `WebSocket.subscribe`, `WebSocket.unsubscribe` and
   `WebSocket.publish`. A connection that never subscribes behaves exactly as

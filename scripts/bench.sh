@@ -7,6 +7,8 @@
 #   scripts/bench.sh nimony-1x32 1 32 ./bin/chatserver
 #
 # Relative paths in <server-cmd> are resolved from the repository root.
+# TOTAL_CLIENTS_OVERRIDE and READY are passed to the client: an echo server
+# (one recipient per message) wants TOTAL_CLIENTS_OVERRIDE=1 READY=0.
 # Raw logs land in results/<tag>/; the summary is appended to its summary.txt.
 # ROUNDS (default 8) is the number of measured rounds per client process.
 set -u
@@ -42,7 +44,8 @@ mkdir -p "$barrier"
 c1=$(cpu)
 pids=()
 for i in $(seq 0 $((nprocs - 1))); do
-  CLIENTS_COUNT="$per" TOTAL_CLIENTS=$((per * nprocs)) ROUNDS="${ROUNDS:-8}" \
+  CLIENTS_COUNT="$per" TOTAL_CLIENTS="${TOTAL_CLIENTS_OVERRIDE:-$((per * nprocs))}" \
+    ROUNDS="${ROUNDS:-8}" READY="${READY:-1}" \
     BARRIER_DIR="$barrier" PROC_ID="$i" NPROCS="$nprocs" \
     node "$ROOT/src/bench-client.mjs" > "$out/client.$i.log" 2>&1 &
   pids+=($!)

@@ -27,13 +27,13 @@ One round is 32 clients × 1600 messages each, every message fanned out to all
 
 | server | client procs | round | deliveries/s | server CPU |
 |---|---|---|---|---|
-| Bun `Bun.serve` | 1 × 32 | 635 ms | **2,515,891** | 0.49 s |
-| Bun `Bun.serve` | 4 × 8 | 224 ms | **7,353,584** | 0.45 s |
-| nimony, `Room` | 1 × 32 | 608 ms | **2,665,439** | 0.77 s |
-| nimony, `Room` | 2 × 16 | 340 ms | **4,729,159** | 0.59 s |
-| nimony, `Room` | 4 × 8 | 241 ms | **6,689,450** | 0.59 s |
-| nimony, writer per connection | 1 × 32 | 644 ms | **2,477,026** | 6.10 s |
-| nimony, writer per connection | 4 × 8 | 525 ms | **3,088,521** | 5.22 s |
+| Bun `Bun.serve` | 1 × 32 | 637 ms | **2,527,099** | 0.50 s |
+| Bun `Bun.serve` | 4 × 8 | 214 ms | **7,559,182** | 0.44 s |
+| nimony, `Room` | 1 × 32 | 601 ms | **2,687,542** | 0.80 s |
+| nimony, `Room` | 2 × 16 | 355 ms | **4,455,424** | 0.67 s |
+| nimony, `Room` | 4 × 8 | 246 ms | **6,378,984** | 0.57 s |
+| nimony, writer per connection | 1 × 32 | 648 ms | **2,474,128** | 6.99 s |
+| nimony, writer per connection | 4 × 8 | 571 ms | **2,729,327** | 5.59 s |
 
 The Bun 4×8 row is the noisiest (6.4–7.6 M across runs on this shared box);
 nimony's 4×8 row is 6.6–6.8 M.
@@ -44,10 +44,10 @@ Bun **183,876 msg/s** (~8.7 ms, ~5 µs each).
 
 Reading the table:
 
-* **With one client process nimony is ahead** (2.64 M against 2.54 M): there the
+* **With one client process nimony is ahead** (2.69 M against 2.53 M): there the
   client is the bottleneck, and the room's turn costs less than Bun's loop.
-* **Bun is still ahead with four client processes** — 7.35 M against 6.69 M —
-  but by 10%, not by 3×. nimony's server CPU is *flat* at 0.6–0.8 s whatever
+* **Bun is still ahead with four client processes** — 7.56 M against 6.38 M —
+  but by 18%, not by 3×. nimony's server CPU is *flat* at 0.6–0.8 s whatever
   the split, against Bun's 0.45–0.49 s: a 1.3× difference, not a 15× one.
 * The last two rows are the same room with a writer chain per connection,
   which is what the library's one-writer-per-connection rule forces an
@@ -216,6 +216,54 @@ deliveries per syscall**; Bun's `sendto` carries 33.
 What is left is the channel hop per message and the frame encode + copy: 0.59 s
 of server CPU per 5 rounds against Bun's 0.45 s. It no longer limits throughput
 on this box.
+
+## Plain echo: no fan-out at all
+
+The chat room hides the per-message cost under the fan-out. `scripts/run-echo.sh`
+measures it on its own: a server that sends every message back to the
+connection that sent it and nowhere else, driven by the same client
+(`READY=0 TOTAL_CLIENTS=1`, so each client counts only its own echoes). One
+round is 32 × 1600 = 51,200 messages and 51,200 deliveries.
+
+| | round | messages/s | server CPU per round | per message |
+|---|---|---|---|---|
+| Bun `Bun.serve` | 165 ms | **290,701** | 0.108 s | 0.66 µs |
+| nimony `std/websocket` | 172 ms | **287,171** | 0.122 s | 1.3 µs |
+| Bun `Bun.serve` | 64 ms | **742,101** | 0.034 s | 0.66 µs |
+| nimony `std/websocket` | 90 ms | **562,025** | 0.066 s | 1.3 µs |
+
+(upper rows: one client process, lower rows: four)
+
+So with one client process nimony is level with Bun on a plain echo, and with
+four it is at 76% on twice Bun's CPU per message. The syscalls are not the
+problem: 3,436 `io_uring_enter` per round is **15 messages per write**, against
+Bun's 33 per `sendto`.
+
+Getting there needed one thing: **an echo reply must not be its own syscall.**
+The pair's `recv` flushes before it parks — that is the safety net that keeps a
+`flush = false` sender from deadlocking — and it used to flush on *every* call,
+so `send(flush = false)` was undone by the next `recv`. It now flushes only when
+the connection has nothing buffered (`WebSocketReader.buffered`), which is when
+the wait really happens; while frames are still coming, the replies ride along.
+An echo server that writes `flush = false` then answers a burst with one write:
+
+```nim
+var ws = upgradeWebSocket(c)
+while true:
+  var msg = ""
+  case ws.recv(msg)
+  of mkText, mkBinary: ws.send(kind, msg, flush = false)
+  of mkClose: break
+  else: discard
+```
+
+That halved the server's CPU on the echo benchmark (0.56 s → 0.33 s per 5
+rounds at four client processes) and moved it from 76% to level with Bun at one.
+
+What is left per message is the runtime's cost, not the socket path: two
+`.passive` calls per message (`recv` and `send`), a UTF-8 check on the way in
+and another on the way out (an echo validates the same bytes twice), and the
+parse/encode copies. Bun has none of the first two.
 
 ## What is left
 
