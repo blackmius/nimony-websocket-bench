@@ -1,1 +1,1 @@
-e-nim                  4 client proc(s)  round=   47.4 ms  aggregate=  1073783 msg/s  server_cpu=  0.99s  alive=yes
+e-nim                  4 client proc(s)  round=   49.4 ms  aggregate=  1111019 msg/s  server_cpu=  0.97s  alive=yes

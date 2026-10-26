@@ -172,6 +172,14 @@ A callgrind profile of that regime named two things:
   descriptor: `opTimeout` and `opNop` carry `fd = -1`, which a table accepted
   and an array does not). That was another **+8%** on the same benchmark.
 
+The price, and it is the one row that pays it: the **plain echo at one client
+process loses ~6%** (314k → 294k). There the client is the limit and the server
+is idle a third of the round, so it is latency, not capacity, that the
+trampoline delays: with 32 pipelined connections the worker keeps unwinding a
+chain instead of getting back to a poll that has ~19 completions waiting. Every
+other row gained: echo 4×8 +13% (993k → 1.12M), chat 4×8 +3.7%, chat 1×32 −1.5%
+(inside its own spread), 512 connections +10%.
+
 Two other ideas were measured and rejected in that regime: spinning in the poll
 loop instead of blocking (rate and CPU identical — the wakeup was never the
 cost) and submitting the write without parking on it (neutral).
