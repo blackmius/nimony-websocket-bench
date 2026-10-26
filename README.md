@@ -61,7 +61,9 @@ Reading the table:
 ## What was changed
 
 Five changes, in the order they were made and measured. Each one is in the
-nimony tree; the numbers are `nimony-1x32` from `results/`.
+nimony tree; the numbers are the per-connection server at one client process
+(`conn-1x32` in `results/`), because that is the one that was being optimised
+at each step.
 
 ### 1. One flush per frame, not two
 
