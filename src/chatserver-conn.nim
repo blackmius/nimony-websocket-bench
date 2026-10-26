@@ -22,12 +22,14 @@ when defined(posix):
   const SigPipe: cint = 13
 
 proc ignoreSigPipe() =
-  ## A peer that vanishes makes the next write fail with EPIPE, and the
-  ## default action for SIGPIPE is to kill the process: one client closing
-  ## its tab would take the server down. The runtime installs no handler of
+  ## A peer that vanishes makes the next write fail with EPIPE, and on a POSIX
+  ## system the default action for SIGPIPE is to kill the process: one client
+  ## closing its tab would take the server down. Windows has no SIGPIPE; a
+  ## write to a closed socket is an error there. The runtime installs no handler of
   ## its own and the write path does not pass MSG_NOSIGNAL, so this is the
   ## server's to do.
-  discard cSignal(SigPipe, cast[pointer](1))   # SIG_IGN
+  when defined(posix):
+    discard cSignal(SigPipe, cast[pointer](1))   # SIG_IGN
 
 const
   MaxOutbox = 256

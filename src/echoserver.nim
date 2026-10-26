@@ -16,9 +16,11 @@ when defined(posix):
   const SigPipe: cint = 13
 
 proc ignoreSigPipe() =
-  ## A peer that vanishes makes the next write fail with EPIPE, and the
-  ## default action for SIGPIPE is to kill the process.
-  discard cSignal(SigPipe, cast[pointer](1))   # SIG_IGN
+  ## A peer that vanishes makes the next write fail with EPIPE, and on a POSIX
+  ## system the default action for SIGPIPE is to kill the process. Windows has
+  ## no SIGPIPE; a write to a closed socket is an error there.
+  when defined(posix):
+    discard cSignal(SigPipe, cast[pointer](1))   # SIG_IGN
 
 var tags = newHttpTags()
 
