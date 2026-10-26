@@ -27,36 +27,35 @@ One round is 32 clients × 1600 messages each, every message fanned out to all
 
 | server | client procs | round | deliveries/s | server CPU |
 |---|---|---|---|---|
-| Bun `Bun.serve` | 1 × 32 | 637 ms | **2,505,360** | 0.48 s |
-| Bun `Bun.serve` | 4 × 8 | 242 ms | **6,927,820** | 0.43 s |
-| nimony hub | 1 × 32 | 750 ms | **2,157,985** | 1.30 s |
-| nimony hub | 2 × 16 | 505 ms | **3,153,820** | 1.29 s |
-| nimony hub | 4 × 8 | 386 ms | **4,112,705** | 1.29 s |
-| nimony, writer per connection | 1 × 32 | 669 ms | **2,389,735** | 6.08 s |
-| nimony, writer per connection | 4 × 8 | 570 ms | **2,705,367** | 5.64 s |
+| Bun `Bun.serve` | 1 × 32 | 678 ms | **2,447,142** | 0.53 s |
+| Bun `Bun.serve` | 4 × 8 | 223 ms | **7,409,721** | 0.45 s |
+| nimony, `Room` | 1 × 32 | 761 ms | **2,108,847** | 1.39 s |
+| nimony, `Room` | 2 × 16 | 497 ms | **3,220,665** | 1.31 s |
+| nimony, `Room` | 4 × 8 | 406 ms | **3,903,614** | 1.39 s |
+| nimony, writer per connection | 1 × 32 | 649 ms | **2,480,706** | 7.68 s |
+| nimony, writer per connection | 4 × 8 | 612 ms | **2,624,381** | 5.90 s |
 
 The Bun 4×8 row is the noisiest (6.4–7.6 M across runs on this shared box);
 nimony's 4×8 row is 3.6–4.2 M.
 
 Per single message (one connection, 1600 round trips, no fan-out):
-nimony **32,601 msg/s** (~49 ms per 1600 round trips, ~31 µs each),
-Bun **187,140 msg/s** (~8.5 ms, ~5 µs each).
+nimony **32,228 msg/s** (~50 ms per 1600 round trips, ~31 µs each),
+Bun **183,876 msg/s** (~8.7 ms, ~5 µs each).
 
 Reading the table:
 
-* **With one client process the two are equal** (2.16–2.39 M against 2.51 M):
+* **With one client process the two are level** (2.11–2.48 M against 2.45 M):
   there the client is the bottleneck, not the server.
-* **Bun scales further** — 6.9 M against 4.1 M with four client processes —
-  but no longer by an order of magnitude, and nimony's server CPU is now
-  *flat* at 1.29 s whatever the split: it stopped being the limit.
-* **Bun is still ~3× cheaper per delivery** (0.43 s against 1.29 s of server
-  CPU for the same 8.2 M deliveries). That difference is now small in absolute
-  terms on this box, and it is what keeps Bun ahead when four client processes
-  compete with the server for the four cores.
-* The last two rows are the same room with a writer chain per connection, which
-  is what the library's one-writer-per-connection rule forces an application
-  into. Same throughput at one client process, 4.4× the CPU, and it stops
-  scaling at 2.7 M — see [Why Bun still scales better](#why-bun-still-scales-better).
+* **Bun still scales further** — 7.4 M against 3.9 M with four client
+  processes — but nimony's server CPU is now *flat* at 1.3 s whatever the
+  split: it stopped being the limit. The remaining gap is a ~3× CPU-per-
+  delivery difference (0.45 s against 1.39 s for the same 8.2 M deliveries),
+  which on four cores is the difference between leaving the clients 3.9 cores
+  and leaving them 3.55.
+* The last two rows are the same room with a writer chain per connection,
+  which is what the library's one-writer-per-connection rule forces an
+  application into without a `Room`. Same throughput at one client process,
+  5.5× the CPU, and it stops scaling at 2.6 M.
 
 ## What was changed
 
@@ -148,56 +147,75 @@ already met by the ring: ops are queued per lane and the backend drains up to
 syscall per frame because the writer waited for each write, so there was never
 more than one op in the queue.
 
-## Why Bun still scales better
+## The room: publish/subscribe in `std/websocket`
 
 Bun's server does the whole fan-out in **one** task: a published message is 32
 appends to 32 per-connection buffers, and each connection is flushed once per
-event-loop turn. There is no hand-off per message and no task per connection.
+event-loop turn. `std/websocket` allows exactly one writer per connection — a
+task that writes another connection's socket interleaves two frames — so an
+application on the pair API has to give every connection a writer chain of its
+own and publish through one channel per connection. A message then costs 32
+channel sends, 32 wakeups and a task per delivery, which is the `writer per
+connection` row above: it stops scaling at 2.6 M.
 
-`std/websocket` allows exactly one writer per connection — a task that writes
-another connection's socket interleaves two frames — so the obvious server
-gives every connection a writer chain of its own and publishes through one
-channel per connection. A message then costs 32 channel sends (each a
-ticket-lock round trip, a 24-byte copy and a wakeup), 32 writer chains waking
-up, and one syscall per chain per burst. That is the `writer per connection`
-row above: it stops scaling at 2.7 M because the fan-out plumbing, not the
-network, is what it runs out of.
+`std/websocket` now has a `Room` that keeps the rule and gets Bun's shape: it
+owns the members' writers, and `publish` hands it one line.
 
-The **hub** is the same trick Bun uses, within the same rule: one chain owns
-every connection's writer. A reader sends the line to the hub (one channel send
-per message instead of 32), the hub writes it into every connection's buffer
-with `flush = false`, and when its inbox runs dry it flushes each connection
-once. That is `src/chatserver.nim`; the per-connection server is kept as
-`src/chatserver-conn.nim` for the comparison.
+```nim
+let room = newRoom()
 
-| | writer per connection | hub |
+proc handle(c: sink HttpConnection; room: Room) {.passive.} =
+  if not c.next(): return
+  var ws = upgradeWebSocket(c)
+  var sub = room.join(ws, "chat")     # the room writes from here on
+  try:
+    while true:
+      var msg = ""
+      case sub.recv(msg)
+      of mkText: room.publish("chat", msg)
+      of mkClose: break
+      else: discard
+  except ErrorCode:
+    discard
+  sub.close()
+```
+
+The room writes into every member's buffer with `flush = false` and flushes
+each member once per turn, so a message costs one channel send and one buffer
+append per member. That is `src/chatserver.nim`; the per-connection server is
+kept as `src/chatserver-conn.nim` for the comparison.
+
+| | writer per connection | `Room` |
 |---|---|---|
-| deliveries/s, 1 client process | 2,389,735 | 2,157,985 |
-| deliveries/s, 4 client processes | 2,705,367 | **4,112,705** |
-| server CPU per round | 1.13–1.22 s | **0.26 s** |
-| `io_uring_enter` per round | 45,595 | **3,358** |
+| deliveries/s, 1 client process | 2,480,706 | 2,108,847 |
+| deliveries/s, 4 client processes | 2,624,381 | **3,903,614** |
+| server CPU per round | 1.18–1.54 s | **0.26–0.28 s** |
+| `io_uring_enter` per round | 45,595 | **3,261** |
 
-The hub gives up a little latency at one client process (the fan-out is
-serialised, and the last connection in the turn is written after the first) and
-wins 1.5× throughput and 4.4× CPU once the clients can push. Its 3,358 enters
-per round are **488 deliveries per syscall** — Bun's `sendto` carries 33.
+The room gives up a little latency at one client process (the fan-out is
+serialised, so the last member in a turn is written after the first) and wins
+1.5× throughput and 5.5× CPU once the clients can push. Its 3,261 enters per
+round are **502 deliveries per syscall**; Bun's `sendto` carries 33.
 
-What is left after that is a ~3× CPU-per-delivery difference, in the frame
-encode + copy and the one channel hop per message, and it no longer limits
+What is left after that is the ~3× CPU-per-delivery difference: the frame
+encode + copy and the one channel hop per message. It no longer limits
 throughput on this box.
 
 ## What is left
 
-* The hub writes all 32 connections and *then* flushes them one after another,
-  each flush waiting for its own write. Those 32 waits are sequential; letting
-  them overlap (submit the turn's writes, wait for all of them once) would need
-  a submit-without-wait plus a wait, which is the deferred-submit variant
+* The room's turn ends by flushing its members one after another, and each
+  flush waits for its own write, so those waits are sequential. Overlapping
+  them — submit the turn's writes, wait once — needs "submit without waiting"
+  plus "wait for the drain". The deferred-submit variant
   [rejected above](#4-what-was-tried-and-rejected-submit-at-the-end-of-the-cycle)
-  — but combined with the wait, not instead of it. That is the next thing to
-  measure.
+  is exactly the first half; with the wait kept, a turn's flushes would overlap
+  instead of serialising. That is the next thing to measure.
 * The channel hop per message: one ticket-lock round trip and a 24-byte copy.
-  Batching the reader's lines before handing them to the hub would cut it by
-  the batch size, at the cost of an allocation per batch.
+  Batching a reader's lines before handing them to the room would cut it by the
+  batch size, at the cost of an allocation per batch.
+* `Room` finds a member by scanning its list, and a publish checks the topic of
+  every member. Fine for a chat room, wrong for ten thousand subscribers and
+  many topics; that wants an index.
 
 ## Other things found while writing the server
 

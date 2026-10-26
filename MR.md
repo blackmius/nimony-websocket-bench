@@ -1,58 +1,63 @@
-# std/websocket: one flush per frame, no per-frame allocation, and a batched fan-out
+# std/websocket: a `Room` for fan-out, one flush per frame, no per-frame allocation
 
 ## Summary
 
-A chat-room server written on `std/websocket` moved **927k → 2.36M fan-out
-messages/s** on a 4-core aarch64 box, with the server's CPU per round down from
-4.75 s to 1.40 s and `io_uring_enter` calls per round down from 1,478,997 to
-45,595. Bun's own server, same client, same machine: 2.40M messages/s and
-49,765 `sendto`.
+A chat-room server written on `std/websocket` — the workload of Bun's
+[`bench/websocket-server`](https://github.com/oven-sh/bun/tree/main/bench/websocket-server)
+— moved **927k → 2.48M** fan-out messages/s on a 4-core aarch64 box with the
+existing pair API, and **2.62M → 3.90M** with four client processes once the
+new `Room` does the fan-out. Server CPU per round went from 4.75 s to 1.40 s
+(pair API) and 0.26 s (room); `io_uring_enter` calls per round from 1,478,997
+to 45,595 and 3,261. Bun's own server, same client, same machine: 2.45M and
+7.41M, at 0.53 s and 0.45 s.
 
-Three things were in the way, all of them in the write path:
+Four things were in the way, all in the write path:
 
 1. `sendFrame` wrote the frame header and the payload with **two**
    `write` + `flush` pairs. A flush is a syscall and, on a ring, a
    submit-and-wait, so a two-byte header cost as much as the payload.
-2. Every frame cost **two heap allocations**: one for the header string, and
-   one for a client's masked copy of the payload.
+2. Every frame cost **two heap allocations**: one for the header string, one
+   for a client's masked copy of the payload.
 3. There was no way to write a **run** of frames with one syscall, which is
-   what a fan-out needs: one published message becomes 32 frames, and each of
-   them paid a syscall of its own.
+   what a fan-out needs: one published message becomes 32 frames, each paying a
+   syscall of its own.
+4. There was no **publish/subscribe** at all, so an application had to give
+   every connection a writer chain of its own and fan out through one channel
+   per connection: 32 channel sends, 32 wakeups and a task per delivery.
 
-The MR fixes all three, and adds the two primitives an application needs to use
-them (a non-parking channel receive, and an in-place buffer append).
+The MR fixes all four, and adds the primitives they need (`Writer.grow`, a
+non-parking channel receive, and `Room`).
 
-Everything here is additive: existing call sites keep their exact behaviour,
-and the wire bytes are unchanged (`tests/nimony/websocket/tframe.nim` checks
-them against the RFC's own spelling).
+Everything is additive: existing call sites keep their exact behaviour, and the
+wire bytes are unchanged (`tests/nimony/websocket/tframe.nim` checks them
+against the RFC's own spelling).
 
 ## Numbers
 
-Workload: Bun's [`bench/websocket-server`](https://github.com/oven-sh/bun/tree/main/bench/websocket-server)
-— 32 clients, each sends 1600 messages, every message is echoed to all 32
-clients. One round is 51,200 publishes and 1,638,400 frame deliveries. Median
-of 5 rounds, `nimony c -d:release`, 4-core aarch64.
+Workload: 32 clients, each sends 1600 messages, every message is echoed to all
+32 clients. One round is 51,200 publishes and 1,638,400 frame deliveries.
+Median of 5 rounds, `nimony c -d:release`, 4-core aarch64.
 
-| | before | after | Bun 1.4.4 |
-|---|---|---|---|
-| deliveries/s (1 client process) | 927,248 | **2,356,284** | 2,396,351 |
-| server CPU per round | 4.75 s | **1.40 s** | ~0.09 s |
-| `io_uring_enter` per round | 1,478,997 | **45,595** | 49,765 `sendto` |
-| deliveries/s (4 client processes) | 824,417 | **2,663,686** | 5,316,157 |
+| | before | after (pair API) | after (`Room`) | Bun 1.4.4 |
+|---|---|---|---|---|
+| deliveries/s, 1 client process | 927,248 | 2,480,706 | 2,108,847 | 2,447,142 |
+| deliveries/s, 4 client processes | 824,417 | 2,624,381 | **3,903,614** | 7,409,721 |
+| server CPU per round, 1 process | 4.75 s | 1.40 s | 0.26 s | ~0.09 s |
+| `io_uring_enter` per round | 1,478,997 | 45,595 | **3,261** | 49,765 `sendto` |
 
-Per change, each measured on its own:
+Per change, each measured on its own with the pair API at one client process:
 
 | change | deliveries/s | server CPU per round |
 |---|---|---|
 | baseline | 927,248 | 4.75 s |
 | 1. one flush per frame | 1.22 M | 3.55 s |
 | 2. `flush = false` + `tryRecv` drain | 2.38 M | 1.74 s |
-| 3. frame spelled in place | 2.36 M | ~1.40 s |
+| 3. frame spelled in place | 2.48 M | ~1.40 s |
 
 The syscall count is the clearest single number: **~0.9 `io_uring_enter` per
-delivered frame before, ~36 frames per call after** — the ring already batches
-up to 128 queued ops per `poll`, and the only reason it never had more than one
-was that the writer waited for each write to complete.
+delivered frame before, ~36 frames per call after, ~502 with the room** — the
+ring already batches up to 128 queued ops per `poll`, and the only reason it
+never had more than one was that the writer waited for each write to complete.
 
 ## What changed
 
@@ -64,18 +69,34 @@ was that the writer waited for each write to complete.
 * The frame is spelled in place: `fillHeader`/`fillFrame` write into the
   writer's buffer through the new `Writer.grow`, so a frame allocates nothing.
   A client's payload is still copied (masking must not touch the caller's
-  bytes), but into the same buffer instead of a string of its own.
-* Frames above `MaxBufferedFrame` (32 KiB) keep the old path: there the copy
-  costs more than the allocation, so the payload goes to the kernel straight
-  from the caller's memory.
+  bytes), but into the same buffer instead of a string of its own. Frames above
+  `MaxBufferedFrame` (32 KiB) keep the old path: there the copy costs more than
+  the allocation.
 * `frameHeader` is now a thin wrapper over `fillHeader` — same bytes, one
-  implementation instead of two.
+  implementation.
 * `send` takes `flush = true`. With `flush = false` the frame only joins the
   connection's buffer; a run of frames then reaches the kernel as one write.
-  `flush` is exposed on `WebSocketWriter` and `WebSocket`.
-* The pair's `recv` flushes before it parks, so a writer that also reads can
-  never leave a frame behind and wait for an answer to something the peer has
-  not been told. A flush of an empty buffer does not reach the descriptor.
+  `flush` is exposed on `WebSocketWriter` and `WebSocket`. The pair's `recv`
+  flushes before it parks, so a writer that also reads can never leave a frame
+  behind and wait for an answer to something the peer has not been told.
+* **`Room`** — publish/subscribe, and the only place in the module that writes
+  to more than one connection:
+
+  ```nim
+  let room = newRoom()                       # starts the fan-out chain
+  var ws = upgradeWebSocket(c)
+  var sub = room.join(ws, "chat")            # the room owns the writer now
+  ...
+  room.publish("chat", msg)                  # one channel send
+  ```
+
+  `join` moves the writer into the room and hands back the receive half as a
+  `Sub` (`recv`, `send`, `close`). The room writes into every member's buffer
+  with `flush = false` and flushes each member once per turn, so a publish is
+  one channel send and one buffer append per member — not a task per delivery.
+  Pings are answered and closes echoed through the room, since it is what owns
+  the writer. `publish` parks when the room's queue is full: that is the
+  backpressure, and it is per room rather than per member.
 
 ### `lib/std/streamio.nim`
 
@@ -109,9 +130,7 @@ Bun keeps a per-connection buffer and lets the event loop submit it, so the
 same shape was implemented in `streamio`: keep the bytes in the core, add a
 `gBeforePoll` hook to `ioring` that runs once per cycle from the pool's reactor
 step, and submit **one** write per connection per cycle — no `flush` knob at
-all, no waiting.
-
-It measured **worse**:
+all, no waiting. It measured worse:
 
 | variant | deliveries/s | `io_uring_enter` per round |
 |---|---|---|
@@ -126,50 +145,52 @@ one op, and waiting for that op is what lets the next thirty queue up. `flush`
 does not control *when* the submit happens (that is the loop's business); it
 controls *how much* is in the buffer when the op is created.
 
-The hook was removed; the change set is what measured best.
+The hook was removed; the change set is what measured best. (In a `Room` the
+batch comes from the room's queue instead, which is why the room does not need
+the per-frame flush at all.)
 
 ## Testing
 
-* `tests/nimony/websocket` (2/2) — including the frame codec's byte-for-byte
-  RFC checks and the 31-case server suite over a real socket.
+* `tests/nimony/websocket/tframe.nim` — the frame codec, byte for byte against
+  the RFC.
+* `tests/nimony/websocket/tserver.nim` — 31 cases over a real socket: the
+  handshake, the three length forms, fragments, pings, and the protocol
+  violations a server has to refuse.
+* `tests/nimony/websocket/troom.nim` (new) — a room over a real socket: a
+  publish reaches every member including the sender, a direct send reaches one
+  connection only, a ping is answered through the room, a member leaving does
+  not take the room with it, and the room answers the peer's close.
 * `tests/nimony/http` (15/15), `tests/nimony/streams` (4/4) — `streamio` and
   `channels` are under both.
 * `tests/nimony/stdlib/tall.nim` — every module in `lib/std` still compiles
   together.
 
 The benchmark, its harness and the raw logs (including the `strace -c` counts)
-are in a separate repository:
-`nimony-websocket-bench` (`scripts/run-all.sh` reproduces the table).
+are in a separate repository, `nimony-websocket-bench` (`scripts/run-all.sh`
+reproduces the table).
 
 ## Compatibility
 
 * No behaviour change for existing callers: `flush` defaults to `true`, and a
   flush of an empty buffer is free.
-* `frameHeader`, `writeProto` and every other public signature are unchanged.
+* `frameHeader`, `writeProto` and every other existing public signature are
+  unchanged.
 * New API only: `Writer.grow`, `Reader.tryReadRecord`, `Receiver.tryRecv`,
-  `WebSocketWriter.flush`, `WebSocket.flush`, and the `flush` parameter on
-  `send`.
-
-## What this enables in an application
-
-The benchmark server was rewritten on top of `flush = false` + `tryRecv` into a
-*hub*: one chain owns every connection's writer, a reader hands it a line (one
-channel send instead of 32), and it flushes each connection once per turn. On
-the same box that is 2.7 M → 4.1 M deliveries/s with four client processes, and
-server CPU 5.64 s → 1.29 s per round, because the library's one-writer-per-
-connection rule no longer forces a channel send, a wakeup and a task per
-delivery. `io_uring_enter` per round drops from 45,595 to 3,358 — 488
-deliveries per syscall, against Bun's 33 per `sendto`.
+  `WebSocketWriter.flush`, `WebSocket.flush`, the `flush` parameter on `send`,
+  and `Room`/`Sub` with `newRoom`, `join`, `publish`, `Sub.recv`, `Sub.send`,
+  `Sub.close`.
 
 ## Follow-ups (not in this MR)
 
-* The hub's turn ends by flushing 32 connections one after another, and each
+* The room's turn ends by flushing its members one after another, and each
   flush waits for its own write, so those waits are sequential. Overlapping
   them — submit the turn's writes, wait once — needs "submit without waiting"
   plus "wait for the drain". The deferred-submit variant measured above is
   exactly the first half, and it lost because it dropped the second; with the
-  wait kept, the 32 flushes of a turn would overlap instead of serialising.
-  That is the next measurement, and it is a library change only if it pays.
+  wait kept, a turn's flushes would overlap instead of serialising.
+* `Room` scans its member list to find a member and checks the topic of every
+  member on a publish. Fine for a chat room, wrong for ten thousand
+  subscribers; that wants an index (and a topic set per member).
 * A client that disconnects still kills a server that does not install
   `SIG_IGN` for `SIGPIPE`: the runtime has no handler and the write path does
   not pass `MSG_NOSIGNAL` (the flag is defined in `lib/std/posix/io_uring.nim`
