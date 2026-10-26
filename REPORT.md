@@ -10,9 +10,9 @@ workload: 32 clients, every message echoed to all of them, one round =
 
 | | before | after | Bun 1.4.4 |
 |---|---|---|---|
-| deliveries/s, 1 client process | 927,248 | **2,690,980** | 2,542,382 |
-| deliveries/s, 4 client processes | 824,417 | **7,638,596** | 7,372,058 |
-| server CPU per round, 1 process | 4.75 s | 0.15 s | 0.10 s |
+| deliveries/s, 1 client process | 927,248 | **2,691,446** | 2,438,464 |
+| deliveries/s, 4 client processes | 824,417 | **6,943,658** | 6,613,595 |
+| server CPU per round, 1 process | 4.75 s | 0.14 s | 0.11 s |
 | `io_uring_enter` per round | 1,478,997 | **3,558** | 49,765 `sendto` |
 
 2.9× more throughput at one client process, 9.3× at four, and ~10× less CPU
@@ -66,18 +66,17 @@ per round.
 
 | | 1 client process | 4 client processes | server CPU per message |
 |---|---|---|---|
-| Bun | 291,709 msg/s | 904,082 msg/s | 0.55 µs |
-| nimony | **275,907 msg/s** | **538,336 msg/s** | 1.45 µs |
+| Bun | 277,125 msg/s | 776,731 msg/s | 0.70 µs |
+| nimony | **275,434 msg/s** | **543,130 msg/s** | 1.45 µs |
 
 Level with Bun at one client process, 60% at four, on 2.6× Bun's CPU per
 message. With 2000-byte messages (per-message cost spread over 133× more bytes)
 nimony is ahead: 160,921 against 143,880 msg/s.
 
-What is left per message is the runtime, not the socket. A callgrind profile
-puts ~60% of the echo server's CPU in the pool's scheduler (`drainOnce`,
-`submit`, `flushStaged`, stripe mutexes, atomics) and the frame codec at ~10 ns
-per message; the server is idle ~50% of the wall time, so the echo is
-latency-bound on the task hand-off per batch, not CPU-bound on the frame path.
+What is left per message is the runtime, not the socket. A callgrind profile over 19,200 real messages puts ~52% of the echo server's
+CPU in the pool (`submit` 17%, stripe mutexes 12%, `drainOnce` 8%, per-poll
+guards 10%), 11% in allocation and ~3% in the frame codec: the echo is
+latency- and scheduler-bound, not bound by the socket path.
 
 ## What is left
 

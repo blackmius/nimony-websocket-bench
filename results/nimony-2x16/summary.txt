@@ -1,1 +1,1 @@
-nimony-2x16            2 client proc(s)  round=  316.8 ms  aggregate=  4968675 msg/s  server_cpu=  0.63s  alive=yes
+nimony-2x16            2 client proc(s)  round=  343.0 ms  aggregate=  4658478 msg/s  server_cpu=  0.68s  alive=yes
