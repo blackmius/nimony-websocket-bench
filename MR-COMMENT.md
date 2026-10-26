@@ -117,19 +117,19 @@ back to back, so the row is "this many clients, at this rate, with this RTT":
 
 | connections | Bun rate | nimony rate | ratio | Bun p99 | nimony p99 |
 |---|---|---|---|---|---|
-| 32 | 170,303 | 137,394 | 81% | 480 µs | 638 µs |
-| 128 | 357,543 | 260,586 | 73% | 960 µs | 2,500 µs |
-| 512 | 400,202 | 287,716 | 71% | 4,307 µs | 7,015 µs |
-| 2048 | 315,491 | 208,598 | 66% | 14,524 µs | 22,768 µs |
+| 32 | 171,674 | 125,441 | 73% | 492 µs | 641 µs |
+| 128 | 376,843 | 256,695 | 68% | 812 µs | 2,379 µs |
+| 512 | 395,067 | 298,846 | 76% | 3,812 µs | 6,919 µs |
+| 2048 | 334,689 | 222,106 | 66% | 12,877 µs | 20,458 µs |
 
 Every connection is held by both (2048/2048, zero errors). nimony's median RTT
-is comparable — better at 512 (968 µs against 1,081 µs) — its tail is ~1.6×
-worse, and it spends 1.6–1.8× the CPU.
+is comparable — better at 512 (857 µs against 1,159 µs) — its tail is ~1.6×
+worse, and it spends 1.6–1.9× the CPU.
 
 At a **fixed** offered rate, with the server's capacity never the limit, the
 picture is the one the thread pool is for: 512 connections at 51,200 msg/s
-offered, both at ~48k delivered, median 763 µs (nimony) against 784 µs (Bun),
-p99 **3.2 ms against 4.4 ms** — and nimony at 0.56 cores against Bun's 0.27.
+offered, both at ~47k delivered, median 871 µs (nimony) against 909 µs (Bun),
+p99 **4.7 ms against 5.6 ms** — and nimony at 0.65 cores against Bun's 0.34.
 
 The gap in the `max` rows is syscall batching: one `epoll_wait` collects every
 ready socket and one `sendto` carries ~32 replies, while the ring does ~3

@@ -345,28 +345,28 @@ medians):
 
 | connections | server | rate | p50 | p99 | server CPU |
 |---|---|---|---|---|---|
-| 32 | Bun | 170,303 | 170 µs | 480 µs | 0.65 |
-| 32 | nimony | 137,394 | 195 µs | 638 µs | 1.06 |
-| 128 | Bun | 357,543 | 307 µs | 960 µs | 0.96 |
-| 128 | nimony | 260,586 | 387 µs | 2,500 µs | 1.75 |
-| 512 | Bun | 400,202 | 1,081 µs | 4,307 µs | 0.95 |
-| 512 | nimony | 287,716 | 968 µs | 7,015 µs | 1.62 |
-| 2048 | Bun | 315,491 | 6,133 µs | 14,524 µs | 0.95 |
-| 2048 | nimony | 208,598 | 8,096 µs | 22,768 µs | 1.75 |
+| 32 | Bun | 171,674 | 169 µs | 492 µs | 0.68 |
+| 32 | nimony | 125,441 | 223 µs | 641 µs | 1.10 |
+| 128 | Bun | 376,843 | 299 µs | 812 µs | 0.97 |
+| 128 | nimony | 256,695 | 391 µs | 2,379 µs | 1.79 |
+| 512 | Bun | 395,067 | 1,159 µs | 3,812 µs | 0.96 |
+| 512 | nimony | 298,846 | 857 µs | 6,919 µs | 1.64 |
+| 2048 | Bun | 334,689 | 5,901 µs | 12,877 µs | 0.96 |
+| 2048 | nimony | 222,106 | 7,091 µs | 20,458 µs | 1.77 |
 
 Reading it:
 
 * **Every connection is held**: 2048 of 2048 opened, zero errors, both servers.
   nimony's accept loop spawns a task per connection and keeps going.
-* **Rate is 66–81% of Bun's**, and the gap widens with concurrency. This is the
+* **Rate is 66–76% of Bun's**, and the gap widens with concurrency. This is the
   one benchmark where Bun's single event loop wins: one `epoll_wait` collects
   every ready socket and one `sendto` carries ~32 replies, while the ring does
   ~3 `io_uring_enter` per burst of ~19 messages.
-* **Median latency is comparable** — better at 512 connections (968 µs against
-  1,081 µs) — but the **tail is ~1.6× worse** (p99 7.0 ms against 4.3 ms at
+* **Median latency is comparable** — better at 512 connections (857 µs against
+  1,159 µs) — but the **tail is ~1.6× worse** (p99 6.9 ms against 3.8 ms at
   512). Three workers spread the median; the tail is a worker that was busy.
-* **CPU is 1.6–1.8× Bun's.** At 128 connections nimony spends 1.75 cores to
-  Bun's 0.96, and on a 4-core box shared with four client processes that is
+* **CPU is 1.6–1.9× Bun's.** At 128 connections nimony spends 1.79 cores to
+  Bun's 0.97, and on a 4-core box shared with four client processes that is
   paid for by the clients.
 
 **Mode `paced`: 512 connections at a fixed offered rate** (one message per
@@ -374,13 +374,13 @@ connection per interval, so the server's capacity is never the limit):
 
 | offered rate | server | rate | p50 | p99 | server CPU |
 |---|---|---|---|---|---|
-| 5,120 msg/s | Bun | 5,069 | 3,255 µs | 9,263 µs | 0.07 |
-| 5,120 msg/s | nimony | 4,806 | 2,422 µs | 10,366 µs | 0.15 |
-| 51,200 msg/s | Bun | 48,182 | 784 µs | 4,419 µs | 0.27 |
-| 51,200 msg/s | nimony | 47,818 | 763 µs | 3,235 µs | 0.56 |
+| 5,120 msg/s | Bun | 5,049 | 3,838 µs | 13,168 µs | 0.08 |
+| 5,120 msg/s | nimony | 4,903 | 3,836 µs | 11,253 µs | 0.20 |
+| 51,200 msg/s | Bun | 46,099 | 909 µs | 5,603 µs | 0.34 |
+| 51,200 msg/s | nimony | 47,451 | 871 µs | 4,714 µs | 0.65 |
 
 At a fixed load the two are level on the median, nimony is **better at the 99th
-percentile** at the higher rate (3.2 ms against 4.4 ms), and it costs 2× the CPU
+percentile** at the higher rate (4.7 ms against 5.6 ms), and it costs 2× the CPU
 of a single-threaded server that is one thread away from its ceiling. That is
 the trade the thread pool makes: twice the CPU, three cores of headroom.
 

@@ -84,7 +84,7 @@ echo "mode=$MODE duration=${DURATION}s procs=$PROCS reps=$REPS"
 echo -e "server\tconns\topened\trate\tp50us\tp99us\terrors\tcpu"
 for conns in $CONNS_LIST; do
   for ((r = 0; r < REPS; r++)); do
-    measure "bun-$conns-r$r" "$conns" bun src/echo-server.bun.js | grep '^RESULT' | cut -f2-
-    measure "nimony-$conns-r$r" "$conns" ./bin/echoserver | grep '^RESULT' | cut -f2-
+    measure "$MODE-bun-$conns-r$r" "$conns" bun src/echo-server.bun.js | grep '^RESULT' | cut -f2-
+    measure "$MODE-nimony-$conns-r$r" "$conns" ./bin/echoserver | grep '^RESULT' | cut -f2-
   done
 done

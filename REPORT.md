@@ -98,15 +98,15 @@ medians of 2 runs, 4 client processes.
 
 | connections | Bun rate | nimony rate | ratio | Bun p99 | nimony p99 |
 |---|---|---|---|---|---|
-| 32 | 170,303 | 137,394 | 81% | 480 µs | 638 µs |
-| 128 | 357,543 | 260,586 | 73% | 960 µs | 2,500 µs |
-| 512 | 400,202 | 287,716 | 71% | 4,307 µs | 7,015 µs |
-| 2048 | 315,491 | 208,598 | 66% | 14,524 µs | 22,768 µs |
+| 32 | 171,674 | 125,441 | 73% | 492 µs | 641 µs |
+| 128 | 376,843 | 256,695 | 68% | 812 µs | 2,379 µs |
+| 512 | 395,067 | 298,846 | 76% | 3,812 µs | 6,919 µs |
+| 2048 | 334,689 | 222,106 | 66% | 12,877 µs | 20,458 µs |
 
 Every connection is held (2048/2048, no errors) by both. nimony's median
-latency is comparable or better, its tail is ~1.6× worse, and it spends 1.6–1.8×
+latency is comparable or better, its tail is ~1.6× worse, and it spends 1.6–1.9×
 Bun's CPU. At a *fixed* offered rate the two are level on the median and nimony
-is better at p99 (3.2 ms against 4.4 ms at 51,200 msg/s offered) — that is the
+is better at p99 (4.7 ms against 5.6 ms at 51,200 msg/s offered) — that is the
 thread pool's trade: twice the CPU, three cores of headroom.
 
 What Bun wins in the many-connection case is syscall batching: one `epoll_wait`
