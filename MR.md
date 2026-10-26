@@ -40,9 +40,9 @@ Median of 5 rounds, `nimony c -d:release`, 4-core aarch64.
 
 | | before | after (pair API) | after (`Room`) | Bun 1.4.4 |
 |---|---|---|---|---|
-| deliveries/s, 1 client process | 927,248 | 2,480,706 | 2,108,847 | 2,447,142 |
-| deliveries/s, 4 client processes | 824,417 | 2,624,381 | **3,903,614** | 7,409,721 |
-| server CPU per round, 1 process | 4.75 s | 1.40 s | 0.26 s | ~0.09 s |
+| deliveries/s, 1 client process | 927,248 | 2,514,840 | 2,094,745 | 2,460,107 |
+| deliveries/s, 4 client processes | 824,417 | 2,683,270 | **3,513,242** | 7,472,494 |
+| server CPU per round, 1 process | 4.75 s | 1.40 s | 0.28 s | ~0.09 s |
 | `io_uring_enter` per round | 1,478,997 | 45,595 | **3,261** | 49,765 `sendto` |
 
 Per change, each measured on its own with the pair API at one client process:
@@ -80,23 +80,26 @@ never had more than one was that the writer waited for each write to complete.
   flushes before it parks, so a writer that also reads can never leave a frame
   behind and wait for an answer to something the peer has not been told.
 * **`Room`** — publish/subscribe, and the only place in the module that writes
-  to more than one connection:
+  to more than one connection. The connection joins it, so the handler stays on
+  the pair API:
 
   ```nim
-  let room = newRoom()                       # starts the fan-out chain
   var ws = upgradeWebSocket(c)
-  var sub = room.join(ws, "chat")            # the room owns the writer now
+  ws.subscribe("chat")                       # the room owns the writer now
   ...
-  room.publish("chat", msg)                  # one channel send
+  ws.publish("chat", msg)                    # one channel send
   ```
 
-  `join` moves the writer into the room and hands back the receive half as a
-  `Sub` (`recv`, `send`, `close`). The room writes into every member's buffer
-  with `flush = false` and flushes each member once per turn, so a publish is
-  one channel send and one buffer append per member — not a task per delivery.
-  Pings are answered and closes echoed through the room, since it is what owns
-  the writer. `publish` parks when the room's queue is full: that is the
-  backpressure, and it is per room rather than per member.
+  `subscribe` moves the writer into the room; from then on `ws.send`, `ws.recv`
+  and `ws.close` go through it, so pings are answered and the peer's close is
+  echoed by whatever owns the writer. The room writes into every member's
+  buffer with `flush = false` and flushes each member once per turn, so a
+  publish is one channel send and one buffer append per member — not a task per
+  delivery. `subscribe`/`publish` use the process-wide `defaultRoom()` when not
+  given one (topics are then just names, as in Bun); `newRoom` gives a server
+  isolated rooms, and `Room.publish` is the server-initiated form. `publish`
+  parks when the room's queue is full: that is the backpressure, and it is per
+  room rather than per member.
 
 ### `lib/std/streamio.nim`
 
@@ -156,8 +159,8 @@ the per-frame flush at all.)
 * `tests/nimony/websocket/tserver.nim` — 31 cases over a real socket: the
   handshake, the three length forms, fragments, pings, and the protocol
   violations a server has to refuse.
-* `tests/nimony/websocket/troom.nim` (new) — a room over a real socket: a
-  publish reaches every member including the sender, a direct send reaches one
+* `tests/nimony/websocket/troom.nim` (new) — a room over a real socket:
+  `ws.publish` reaches every member including the sender, `ws.send` reaches one
   connection only, a ping is answered through the room, a member leaving does
   not take the room with it, and the room answers the peer's close.
 * `tests/nimony/http` (15/15), `tests/nimony/streams` (4/4) — `streamio` and
@@ -177,8 +180,10 @@ reproduces the table).
   unchanged.
 * New API only: `Writer.grow`, `Reader.tryReadRecord`, `Receiver.tryRecv`,
   `WebSocketWriter.flush`, `WebSocket.flush`, the `flush` parameter on `send`,
-  and `Room`/`Sub` with `newRoom`, `join`, `publish`, `Sub.recv`, `Sub.send`,
-  `Sub.close`.
+  and `Room` with `newRoom`, `defaultRoom`, `Room.publish`, `Room.addTopic`,
+  `Room.dropTopic`, plus `WebSocket.subscribe`, `WebSocket.unsubscribe` and
+  `WebSocket.publish`. A connection that never subscribes behaves exactly as
+  before.
 
 ## Follow-ups (not in this MR)
 

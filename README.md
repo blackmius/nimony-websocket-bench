@@ -27,16 +27,16 @@ One round is 32 clients × 1600 messages each, every message fanned out to all
 
 | server | client procs | round | deliveries/s | server CPU |
 |---|---|---|---|---|
-| Bun `Bun.serve` | 1 × 32 | 678 ms | **2,447,142** | 0.53 s |
-| Bun `Bun.serve` | 4 × 8 | 223 ms | **7,409,721** | 0.45 s |
-| nimony, `Room` | 1 × 32 | 761 ms | **2,108,847** | 1.39 s |
-| nimony, `Room` | 2 × 16 | 497 ms | **3,220,665** | 1.31 s |
-| nimony, `Room` | 4 × 8 | 406 ms | **3,903,614** | 1.39 s |
-| nimony, writer per connection | 1 × 32 | 649 ms | **2,480,706** | 7.68 s |
-| nimony, writer per connection | 4 × 8 | 612 ms | **2,624,381** | 5.90 s |
+| Bun `Bun.serve` | 1 × 32 | 645 ms | **2,460,107** | 0.50 s |
+| Bun `Bun.serve` | 4 × 8 | 209 ms | **7,472,494** | 0.34 s |
+| nimony, `Room` | 1 × 32 | 790 ms | **2,094,745** | 1.45 s |
+| nimony, `Room` | 2 × 16 | 540 ms | **2,977,625** | 1.40 s |
+| nimony, `Room` | 4 × 8 | 458 ms | **3,513,242** | 1.42 s |
+| nimony, writer per connection | 1 × 32 | 617 ms | **2,514,840** | 7.00 s |
+| nimony, writer per connection | 4 × 8 | 619 ms | **2,683,270** | 5.57 s |
 
 The Bun 4×8 row is the noisiest (6.4–7.6 M across runs on this shared box);
-nimony's 4×8 row is 3.6–4.2 M.
+nimony's 4×8 row is 3.5–4.2 M.
 
 Per single message (one connection, 1600 round trips, no fan-out):
 nimony **32,228 msg/s** (~50 ms per 1600 round trips, ~31 µs each),
@@ -46,16 +46,16 @@ Reading the table:
 
 * **With one client process the two are level** (2.11–2.48 M against 2.45 M):
   there the client is the bottleneck, not the server.
-* **Bun still scales further** — 7.4 M against 3.9 M with four client
-  processes — but nimony's server CPU is now *flat* at 1.3 s whatever the
+* **Bun still scales further** — 7.5 M against 3.5–4.2 M with four client
+  processes — but nimony's server CPU is now *flat* at 1.4 s whatever the
   split: it stopped being the limit. The remaining gap is a ~3× CPU-per-
-  delivery difference (0.45 s against 1.39 s for the same 8.2 M deliveries),
+  delivery difference (0.34 s against 1.42 s for the same 8.2 M deliveries),
   which on four cores is the difference between leaving the clients 3.9 cores
-  and leaving them 3.55.
+  and leaving them 3.6.
 * The last two rows are the same room with a writer chain per connection,
   which is what the library's one-writer-per-connection rule forces an
   application into without a `Room`. Same throughput at one client process,
-  5.5× the CPU, and it stops scaling at 2.6 M.
+  5× the CPU, and it stops scaling at 2.7 M.
 
 ## What was changed
 
@@ -159,26 +159,30 @@ channel sends, 32 wakeups and a task per delivery, which is the `writer per
 connection` row above: it stops scaling at 2.6 M.
 
 `std/websocket` now has a `Room` that keeps the rule and gets Bun's shape: it
-owns the members' writers, and `publish` hands it one line.
+owns the members' writers, and the connection joins it and publishes through
+it, without leaving the pair API.
 
 ```nim
-let room = newRoom()
-
-proc handle(c: sink HttpConnection; room: Room) {.passive.} =
+proc handle(c: sink HttpConnection) {.passive.} =
   if not c.next(): return
   var ws = upgradeWebSocket(c)
-  var sub = room.join(ws, "chat")     # the room writes from here on
+  ws.subscribe("chat")                # the room writes from here on
   try:
     while true:
       var msg = ""
-      case sub.recv(msg)
-      of mkText: room.publish("chat", msg)
+      case ws.recv(msg)
+      of mkText: ws.publish("chat", msg)     # one channel send
       of mkClose: break
       else: discard
   except ErrorCode:
     discard
-  sub.close()
+  ws.close()
 ```
+
+`subscribe` and `publish` use the process-wide room (`defaultRoom()`) when
+they are not given one, so topics are just names, as in Bun. A server that
+wants isolated rooms makes one with `newRoom` and passes it:
+`ws.subscribe(room, "chat")`.
 
 The room writes into every member's buffer with `flush = false` and flushes
 each member once per turn, so a message costs one channel send and one buffer
@@ -187,14 +191,14 @@ kept as `src/chatserver-conn.nim` for the comparison.
 
 | | writer per connection | `Room` |
 |---|---|---|
-| deliveries/s, 1 client process | 2,480,706 | 2,108,847 |
-| deliveries/s, 4 client processes | 2,624,381 | **3,903,614** |
-| server CPU per round | 1.18–1.54 s | **0.26–0.28 s** |
+| deliveries/s, 1 client process | 2,514,840 | 2,094,745 |
+| deliveries/s, 4 client processes | 2,683,270 | **3,513,242** |
+| server CPU per round | 1.11–1.40 s | **0.28–0.29 s** |
 | `io_uring_enter` per round | 45,595 | **3,261** |
 
 The room gives up a little latency at one client process (the fan-out is
 serialised, so the last member in a turn is written after the first) and wins
-1.5× throughput and 5.5× CPU once the clients can push. Its 3,261 enters per
+1.3–1.5× throughput and 5× CPU once the clients can push. Its 3,261 enters per
 round are **502 deliveries per syscall**; Bun's `sendto` carries 33.
 
 What is left after that is the ~3× CPU-per-delivery difference: the frame

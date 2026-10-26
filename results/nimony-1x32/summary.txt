@@ -1,1 +1,1 @@
-nimony-1x32            1 client proc(s)  round=  761.0 ms  aggregate=  2108847 msg/s  server_cpu=  1.39s  alive=yes
+nimony-1x32            1 client proc(s)  round=  790.4 ms  aggregate=  2094745 msg/s  server_cpu=  1.45s  alive=yes
