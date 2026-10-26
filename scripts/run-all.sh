@@ -11,7 +11,7 @@ ROOT=$(cd "$(dirname "$0")/.." && pwd)
 cd "$ROOT"
 export ROUNDS=${ROUNDS:-5}
 
-if [ ! -x bin/chatserver ]; then
+if [ ! -x bin/chatserver ] || [ ! -x bin/chatserver-conn ]; then
   echo "bin/chatserver missing; run scripts/build.sh first" >&2
   exit 1
 fi
@@ -34,6 +34,9 @@ fi
 scripts/bench.sh nimony-1x32  1 32 ./bin/chatserver
 scripts/bench.sh nimony-2x16  2 16 ./bin/chatserver
 scripts/bench.sh nimony-4x8   4  8 ./bin/chatserver
+# the same room with a writer chain per connection, for the comparison
+scripts/bench.sh conn-1x32    1 32 ./bin/chatserver-conn
+scripts/bench.sh conn-4x8     4  8 ./bin/chatserver-conn
 
 # One connection, 1600 round trips: the cost of a single message with no
 # fan-out at all, where a per-frame I/O cost shows up as latency.

@@ -1,17 +1,18 @@
-# A chat room over std/websocket: the workload of Bun's
-# bench/websocket-server, so the same client script can drive both.
+# The same chat room as `chatserver.nim`, but with one hub chain that owns
+# every connection's writer.
 #
-# One connection is two chains. The reader owns the receive half and the
-# writer owns the send half, because a connection has one writer and the room
-# is written to from other connections: a reader that published by writing
-# the peer's socket itself would interleave two frames in the middle of each
-# other (see the note in std/websocket).
+# `std/websocket` allows exactly one writer per connection, and a task that
+# writes another connection's socket interleaves two frames. The server in
+# `chatserver.nim` therefore gives every connection a writer chain of its own
+# and publishes through one channel per connection: a message costs 32 channel
+# sends, 32 wakeups and 32 tasks' worth of scheduling.
 #
-# Publishing therefore goes through per-connection outboxes: the reader of a
-# connection that received a message drops one copy of the line into every
-# subscriber's channel, and each subscriber's own writer chain puts it on its
-# own wire. The channels are the backpressure — a slow peer parks the
-# publisher instead of growing a queue nobody reads.
+# Here the fan-out is one chain. A reader sends the line to the hub (one
+# channel send), and the hub writes it into every connection's buffer with
+# `flush = false`; when its inbox runs dry it flushes each connection once.
+# A message then costs one channel send and 32 buffer appends, and the
+# syscalls are one per connection per turn instead of one per delivery — the
+# shape Bun's server has.
 
 import std / [httpserver, websocket, socket, ioring, threadpool, atomics,
               ticketlocks, syncio, os, envvars, strutils, channels]
@@ -23,136 +24,155 @@ when defined(posix):
 
 proc ignoreSigPipe() =
   ## A peer that vanishes makes the next write fail with EPIPE, and the
-  ## default action for SIGPIPE is to kill the process: one client closing
-  ## its tab would take the server down. The runtime installs no handler of
-  ## its own and the write path does not pass MSG_NOSIGNAL, so this is the
-  ## server's to do.
+  ## default action for SIGPIPE is to kill the process.
   discard cSignal(SigPipe, cast[pointer](1))   # SIG_IGN
 
 const
-  MaxOutbox = 256
-    ## Messages one connection may have queued before the publisher parks.
-    ## The client sends a whole batch at once, so this absorbs the burst.
+  MaxConns = 512
+    ## Slots in the connection table. A slot is free when its `Conn` is nil.
+  InboxCapacity = 4096
+    ## Lines the hub may have queued before a publisher parks. The batch the
+    ## hub drains per turn is what decides how many frames share one flush.
 
 type
-  OutKind = enum okText, okClose, okPong
-  OutMsg = object
-    kind: OutKind
+  EvKind = enum evJoin, evLeave, evMsg, evPong
+  Ev = object
+    kind: EvKind
+    slot: int
     text: string
 
-  Sub = object
-    id: int
-    outbox: Sender[OutMsg]
+  Conn = ref object
+    ## One connection's writer, owned by the hub from the moment it joins.
+    wr: WebSocketWriter
+    slot: int
 
 var
   tags = newHttpTags()
   regLock: TicketLock
-  subs: seq[Sub]
-  nextId: int
+  conns: array[MaxConns, nil Conn]
+  inbox: Sender[Ev]
   joined: int
   clientsToWaitFor = 32
 
-# ------------------------------------------------------------- the room --
+# --------------------------------------------------------------- the hub --
 
-proc publish(text: string) {.passive, raises.} =
-  ## One line to every subscriber. The registry is copied under the lock and
-  ## written to outside it: `send` parks when an outbox is full, and a task
-  ## parked while holding the registry lock would keep every new connection
-  ## out of the room.
-  var snap: seq[Sub] = @[]
+proc retire(active: var seq[Conn]; i: int) =
+  ## Takes connection `i` out of the room and frees its slot, so a new
+  ## connection can have it.
+  let c = active[i]
+  active.delete i
   acquire regLock
-  snap = subs
+  if conns[c.slot] == c:
+    conns[c.slot] = nil
+    dec joined
   release regLock
-  for s in snap:
-    # `false` is a subscriber that left between the copy and this line.
-    discard s.outbox.send OutMsg(kind: okText, text: text)
+
+proc hubLoop(rx: sink Receiver[Ev]) {.passive.} =
+  ## The one chain that writes to sockets. Everything it writes is buffered
+  ## per connection with `flush = false`; the flush happens when there is
+  ## nothing left in the inbox, so one write carries the whole turn.
+  var active: seq[Conn] = @[]
+  var e = Ev()
+  while true:
+    try:
+      if not rx.tryRecv(e):
+        # The turn is over: what every connection was given goes out now.
+        var i = 0
+        while i < active.len:
+          try:
+            active[i].wr.flush()
+            inc i
+          except ErrorCode:
+            active[i].wr.abort()
+            retire(active, i)
+        if not rx.recv(e): return
+      case e.kind
+      of evJoin:
+        acquire regLock
+        let c = conns[e.slot]
+        release regLock
+        if c != nil: active.add c
+      of evMsg:
+        var i = 0
+        while i < active.len:
+          try:
+            active[i].wr.send(mkText, e.text, flush = false)
+            inc i
+          except ErrorCode:
+            active[i].wr.abort()
+            retire(active, i)
+      of evPong:
+        for c in active:
+          if c.slot == e.slot:
+            try:
+              c.wr.send(mkPong, e.text, flush = false)
+            except ErrorCode:
+              discard
+            break
+      of evLeave:
+        var i = 0
+        while i < active.len and active[i].slot != e.slot: inc i
+        if i < active.len:
+          try:
+            active[i].wr.close(1000)   # flushes what came before, then goodbye
+          except ErrorCode:
+            active[i].wr.abort()
+          retire(active, i)
+    except ErrorCode:
+      discard
 
 proc announce() {.passive.} =
   ## What the Bun server does once the room is full: tell everybody, so the
   ## clients stop waiting for their first message and start sending.
   sleep 100
   try:
-    publish "ready"
+    discard inbox.send Ev(kind: evMsg, text: "ready")
   except ErrorCode:
     discard
 
-proc join(outbox: Sender[OutMsg]): (int, bool) =
-  ## A new subscriber, and whether it was the one that filled the room.
-  acquire regLock
-  result = (nextId, false)
-  inc nextId
-  subs.add Sub(id: result[0], outbox: outbox)
-  inc joined
-  result[1] = joined == clientsToWaitFor
-  release regLock
-
-proc leave(id: int) =
-  acquire regLock
-  for i in 0 ..< subs.len:
-    if subs[i].id == id:
-      subs.delete i
-      break
-  dec joined
-  release regLock
-
 # ------------------------------------------------------ one connection --
 
-proc writerLoop(rx: sink Receiver[OutMsg]; wr: sink WebSocketWriter) {.passive.} =
-  ## The only place this connection's socket is written to.
-  ##
-  ## Frames go out with `flush = false`, and the flush happens when the outbox
-  ## runs dry, just before the chain parks on it: one syscall for a burst of
-  ## frames instead of one per frame. The wait for that syscall is also what
-  ## lets the next burst form — a writer that never waits keeps pace with the
-  ## publisher and would write one frame per op.
-  var m = OutMsg()
-  while true:
-    try:
-      if not rx.tryRecv(m):
-        # Nothing left to write: what is buffered is owed to the peer now.
-        wr.flush()
-        if not rx.recv(m): return
-      case m.kind
-      of okText: wr.send(mkText, m.text, flush = false)
-      of okPong: wr.send(mkPong, m.text, flush = false)
-      of okClose:
-        wr.close(1000)          # flushes what came before it, then the close
-        return
-    except ErrorCode:
-      wr.abort()
-      return
-
 proc nameOf(query: string): string =
-  ## `?name=Alice0`, which is what the client puts on the handshake.
   const Prefix = "name="
   if query.len > Prefix.len and query.startsWith(Prefix):
     result = query.substr(Prefix.len)
   else:
     result = "anon"
 
+proc join(wr: sink WebSocketWriter): int =
+  ## A slot for this connection's writer, and the writer in it. `-1` when the
+  ## table is full.
+  result = -1
+  acquire regLock
+  for i in 0 ..< MaxConns:
+    if conns[i] == nil:
+      conns[i] = Conn(wr: move wr, slot: i)
+      inc joined
+      result = i
+      break
+  release regLock
+
 proc chat(c: sink HttpConnection) {.passive.} =
   if not c.next(): return
-  var id = -1
-  var tx = Sender[OutMsg]()
+  let nm = nameOf(c.query)
+  var slot = -1
   try:
-    let nm = nameOf(c.query)
     var ws = upgradeWebSocket(c)
     var rd = move ws.reader
-    var wr = move ws.writer
-    var (rx, tx2) = channel[OutMsg](MaxOutbox)
-    tx = tx2
-    let (i, full) = join(tx2)
-    id = i
-    submit(delay(writerLoop(rx, wr)), -1)
-    if full: submit(delay(announce()), -1)
+    slot = join(move ws.writer)
+    if slot < 0:
+      rd.close()
+      return
+    discard inbox.send Ev(kind: evJoin, slot: slot)
+    if joined == clientsToWaitFor: submit(delay(announce()), -1)
     while true:
       var msg = ""
       let kind = rd.recv(msg)
       case kind
       of mkText, mkBinary:
-        publish nm & ": " & msg
+        discard inbox.send Ev(kind: evMsg, text: nm & ": " & msg)
       of mkPing:
-        discard tx.send OutMsg(kind: okPong, text: msg)
+        discard inbox.send Ev(kind: evPong, slot: slot, text: msg)
       of mkPong:
         discard
       of mkClose:
@@ -160,13 +180,9 @@ proc chat(c: sink HttpConnection) {.passive.} =
     rd.close()
   except ErrorCode:
     discard
-  if id >= 0:
-    leave(id)
-    # The outbox is dropped from the registry, but this chain still holds a
-    # sender: the close is the last thing the writer chain is told, and it is
-    # told it even when the peer left without a goodbye.
+  if slot >= 0:
     try:
-      discard tx.send OutMsg(kind: okClose, text: "")
+      discard inbox.send Ev(kind: evLeave, slot: slot)
     except ErrorCode:
       discard
 
@@ -192,9 +208,12 @@ proc main =
   initIoRing()
   let port = envInt("PORT", 4001)
   clientsToWaitFor = envInt("CLIENTS_COUNT", 32)
-  submit(delay(serve(uint16(port))), 0)
+  var (rx, tx) = channel[Ev](InboxCapacity)
+  inbox = tx
+  submit(delay(hubLoop(rx)), 0)
+  submit(delay(serve(uint16(port))), 1)
   while true: sleep 1000
 
 main()
 
-{.feature: "assumeSync".}  # the room is shared state, guarded by regLock
+{.feature: "assumeSync".}  # the connection table is shared, guarded by regLock

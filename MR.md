@@ -150,13 +150,26 @@ are in a separate repository:
   `WebSocketWriter.flush`, `WebSocket.flush`, and the `flush` parameter on
   `send`.
 
+## What this enables in an application
+
+The benchmark server was rewritten on top of `flush = false` + `tryRecv` into a
+*hub*: one chain owns every connection's writer, a reader hands it a line (one
+channel send instead of 32), and it flushes each connection once per turn. On
+the same box that is 2.7 M → 4.1 M deliveries/s with four client processes, and
+server CPU 5.64 s → 1.29 s per round, because the library's one-writer-per-
+connection rule no longer forces a channel send, a wakeup and a task per
+delivery. `io_uring_enter` per round drops from 45,595 to 3,358 — 488
+deliveries per syscall, against Bun's 33 per `sendto`.
+
 ## Follow-ups (not in this MR)
 
-* The chat server still needs one writer chain per connection, because
-  `std/websocket` allows exactly one writer per connection — the fan-out has to
-  go through an outbox and a task per connection. A hub task owning every
-  writer would cut 32 channel sends and 32 wakeups per message down to one;
-  that is a server design, not a library one.
+* The hub's turn ends by flushing 32 connections one after another, and each
+  flush waits for its own write, so those waits are sequential. Overlapping
+  them — submit the turn's writes, wait once — needs "submit without waiting"
+  plus "wait for the drain". The deferred-submit variant measured above is
+  exactly the first half, and it lost because it dropped the second; with the
+  wait kept, the 32 flushes of a turn would overlap instead of serialising.
+  That is the next measurement, and it is a library change only if it pays.
 * A client that disconnects still kills a server that does not install
   `SIG_IGN` for `SIGPIPE`: the runtime has no handler and the write path does
   not pass `MSG_NOSIGNAL` (the flag is defined in `lib/std/posix/io_uring.nim`

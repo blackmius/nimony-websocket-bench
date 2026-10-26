@@ -1,1 +1,1 @@
-nimony-4x8             4 client proc(s)  round=  646.0 ms  aggregate=  2663686 msg/s  server_cpu=  6.04s  alive=yes
+nimony-4x8             4 client proc(s)  round=  381.6 ms  aggregate=  4157315 msg/s  server_cpu=  1.26s  alive=yes
