@@ -21,37 +21,36 @@ counter (see [Why not the original counter](#why-not-the-original-counter)).
 4-core aarch64 Linux (6.8), Bun 1.4.4, Node v24.13.0, nimony 0.6.3
 (`nimony c -d:release`).
 
-**Method.** Each pair was measured *interleaved* — Bun, nimony, Bun, nimony — 10
-rounds per configuration, medians reported. The box is shared, so a single pair
-of runs can differ by 10%: the interleaving is what makes the ratio mean
-something, and a 3% difference is not a result.
+**Method.** Each pair was measured *interleaved* — Bun, nimony, Bun, nimony —
+10 rounds per configuration, 3 repetitions each, medians reported. The box is
+shared, so a single pair of runs can differ by 10%: the interleaving is what
+makes the ratio mean something, and a 3% difference is not a result.
 
 One round is 32 clients × 1600 messages each, every message fanned out to all
 32 clients: **51,200 publishes, 1,638,400 frame deliveries**.
 
 | server | clients | round | deliveries/s | server CPU |
 |---|---|---|---|---|
-| Bun `Bun.serve` | 1 × 32 | 641 ms | **2,536,238** | 1.01 s |
-| nimony, `Room` | 1 × 32 | 647 ms | **2,538,241** | 1.95 s |
-| Bun `Bun.serve` | 4 × 8 | 199 ms | **8,117,359** | 0.89 s |
-| nimony, `Room` | 4 × 8 | 204 ms | **7,995,201** | 1.26 s |
+| Bun `Bun.serve` | 1 × 32 | 678 ms | 2,407,612 | 1.08 s |
+| nimony, `Room` | 1 × 32 | 658 ms | **2,466,097** | 1.98 s |
+| Bun `Bun.serve` | 4 × 8 | 218 ms | 7,331,348 | 1.05 s |
+| nimony, `Room` | 4 × 8 | 215 ms | **7,457,286** | 1.44 s |
 
 Reading the table:
 
-* **At parity.** 2.54 M against 2.54 M with one client process (+0.1%) and
-  8.00 M against 8.12 M with four (−1.5%): the two are level, and the sign
-  flips between runs. Before the work below it was 0.93 M against 2.44 M.
-* **Bun uses ~1.3× less CPU** (0.89 s against 1.26 s per 10 rounds at four
-  client processes). The throughput is at parity anyway; the CPU headroom is
-  what a bigger fan-out spends.
-* The per-connection server (`chatserver-conn.nim`, which is what the library's
-  one-writer-per-connection rule forces an application into without a `Room`)
-  is **4.1× slower** in the same run: 1.79 M at 21.45 s of CPU against 7.40 M at
-  1.36 s.
+* **Ahead at both splits**, by 2.4% and 1.7% — small, and inside the noise of a
+  single run, but the sign was the same in every repetition. Before the work
+  below it was 0.93 M against 2.44 M.
+* **Bun uses ~1.4× less CPU** (1.05 s against 1.44 s per 10 rounds at four
+  client processes). The throughput is level anyway; the CPU headroom is what a
+  bigger fan-out spends.
+* The numbers are lower than an earlier run of this table (2.54 M / 8.00 M)
+  because the box was busier; the ratio is what is comparable.
+
 
 ## What was changed
 
-Five changes, in the order they were made and measured. Each one is in the
+Six changes, in the order they were made and measured. Each one is in the
 nimony tree; the numbers are the per-connection server at one client process
 (`conn-1x32` in `results/`), because that is the one that was being optimised
 at each step.
@@ -138,6 +137,17 @@ already met by the ring: ops are queued per lane and the backend drains up to
 128 of them into one `io_uring_enter` per `poll`. The original code paid one
 syscall per frame because the writer waited for each write, so there was never
 more than one op in the queue.
+
+### 6. `TCP_NODELAY` on accept
+
+Not a `std/websocket` change at all: the library never turned Nagle's algorithm
+off, so the kernel could hold a small write until the previous one was
+acknowledged. A server that answers in small messages pays one round trip per
+reply for that, and pays it in latency only — the server's CPU and syscall
+counts look fine, it is just idle. `httpserver.accept` now calls `setNoDelay`
+(one ring op per connection), and the echo benchmark went from 676k to 1.03M
+messages/s at four client processes. See
+[the echo section](#plain-echo-no-fan-out-at-all).
 
 ## The runtime: two queues that no longer lock
 
@@ -291,63 +301,104 @@ method as above.
 
 | | round | messages/s | server CPU per round | per message |
 |---|---|---|---|---|
-| Bun `Bun.serve` | 162 ms | **311,316** | 0.108 s | 2.11 µs |
-| nimony `std/websocket` | 162 ms | **313,275** | 0.117 s | 2.28 µs |
-| Bun `Bun.serve` | 46 ms | **1,186,888** | 0.037 s | 0.72 µs |
-| nimony `std/websocket` | 76 ms | **675,817** | 0.056 s | 1.09 µs |
-| Bun, 2000-byte messages | 335 ms | **151,022** | 0.179 s | 3.50 µs |
-| nimony, 2000-byte messages | 299 ms | **169,192** | 0.230 s | 4.49 µs |
+| Bun `Bun.serve` | 203 ms | 251,697 | 0.136 s | 2.66 µs |
+| nimony `std/websocket` | 170 ms | **297,445** | 0.134 s | 2.62 µs |
+| Bun `Bun.serve` | 51 ms | 1,038,679 | 0.041 s | 0.80 µs |
+| nimony `std/websocket` | 53 ms | **1,026,582** | 0.057 s | 1.10 µs |
+| Bun, 2000-byte messages | 381 ms | 133,921 | 0.197 s | 3.85 µs |
+| nimony, 2000-byte messages | 344 ms | **147,904** | 0.258 s | 5.03 µs |
 
 (upper rows: one client process, lower rows: four; the last two are 2000-byte
 messages, one client process)
 
-So with one client process nimony is level with Bun on a plain echo
-(313,275 against 311,316), and with four it is at 57% on 1.5× Bun's CPU per
-message. The last two rows are the same echo with 2000-byte messages, which
-spreads the per-message cost over 133 times more bytes: there **nimony is
-ahead** (169,192 against 151,022). So the per-byte path — copy, unmask, frame —
-is already better than Bun's, and what is left is the fixed cost of a message.
+nimony is **ahead at one client process (+18%)**, level at four (−1.2%), and
+ahead again on 2000-byte messages (+10%). It spends 1.0× Bun's CPU per message
+at one client process and 1.4× at four.
 
-The four-process row is not a CPU problem any more: the server spends 0.056 s of
-CPU on a round that takes 76 ms, so it is idle a third of the time and the other
-workers are idle throughout. It is the number of I/O round trips per message
-that Bun wins on, and that is the next section's subject.
+**The four-process row was 57% of Bun before one line changed: Nagle.** The
+library never set `TCP_NODELAY`, so the kernel held each small write until the
+previous one was acknowledged — for a server that answers in small messages,
+one extra round trip per reply. It is invisible in CPU (the server was idle a
+third of the round in both cases) and invisible in the syscall counts; it shows
+up only as a latency that does not fall with concurrency. Turning it off on
+accept (`httpserver.accept` → `setNoDelay`) moved that row from **676k to
+1.03M messages/s** and the 8-in-flight p90 from 112 µs to 85 µs.
 
-Getting there needed one thing: **an echo reply must not be its own syscall.**
-The pair's `recv` flushes before it parks — that is the safety net that keeps a
-`flush = false` sender from deadlocking — and it used to flush on *every* call,
-so `send(flush = false)` was undone by the next `recv`. It now flushes only when
-the connection has nothing buffered (`WebSocketReader.buffered`), which is when
-the wait really happens; while frames are still coming, the replies ride along.
-An echo server that writes `flush = false` then answers a burst with one write:
-
-```nim
-var ws = upgradeWebSocket(c)
-while true:
-  var msg = ""
-  case ws.recv(msg)
-  of mkText, mkBinary: ws.send(kind, msg, flush = false)
-  of mkClose: break
-  else: discard
-```
-
-That halved the server's CPU on the echo benchmark (0.56 s → 0.32 s per 5
-rounds at four client processes) and moved it to level with Bun at one client
-process.
-
-Two smaller things went in with it: a client's frames are unmasked eight bytes
+Two smaller things went in earlier: a client's frames are unmasked eight bytes
 at a time instead of one, and `recv` assembles the message in the caller's own
 string instead of a buffer of the reader's that was freed and copied out on
 every message — so a handler that keeps its `msg` across calls allocates
 nothing per message.
 
-What is left per message is the runtime's cost, not the socket path: two
-`.passive` calls per message (`recv` and `send`), a UTF-8 check on the way in
-and another on the way out (an echo validates the same bytes twice), and the
-parse/encode copies. Bun has none of the first two.
+
+## Scalability: many connections
+
+Throughput on one core is one question; "how many clients can it hold" is
+another, and it is the one a server is bought for. `scripts/run-scale.sh` holds
+N connections open, has every one of them ping-pong as fast as it can
+(`MODE=max`), and reports the aggregate rate and the RTT each connection sees.
+Connection counts are split over 4 client processes, and the percentiles are
+over the merged samples of all of them.
+
+**Mode `max`: every connection back-to-back** (8 s per run, 2 runs each,
+medians):
+
+| connections | server | rate | p50 | p99 | server CPU |
+|---|---|---|---|---|---|
+| 32 | Bun | 170,303 | 170 µs | 480 µs | 0.65 |
+| 32 | nimony | 137,394 | 195 µs | 638 µs | 1.06 |
+| 128 | Bun | 357,543 | 307 µs | 960 µs | 0.96 |
+| 128 | nimony | 260,586 | 387 µs | 2,500 µs | 1.75 |
+| 512 | Bun | 400,202 | 1,081 µs | 4,307 µs | 0.95 |
+| 512 | nimony | 287,716 | 968 µs | 7,015 µs | 1.62 |
+| 2048 | Bun | 315,491 | 6,133 µs | 14,524 µs | 0.95 |
+| 2048 | nimony | 208,598 | 8,096 µs | 22,768 µs | 1.75 |
+
+Reading it:
+
+* **Every connection is held**: 2048 of 2048 opened, zero errors, both servers.
+  nimony's accept loop spawns a task per connection and keeps going.
+* **Rate is 66–81% of Bun's**, and the gap widens with concurrency. This is the
+  one benchmark where Bun's single event loop wins: one `epoll_wait` collects
+  every ready socket and one `sendto` carries ~32 replies, while the ring does
+  ~3 `io_uring_enter` per burst of ~19 messages.
+* **Median latency is comparable** — better at 512 connections (968 µs against
+  1,081 µs) — but the **tail is ~1.6× worse** (p99 7.0 ms against 4.3 ms at
+  512). Three workers spread the median; the tail is a worker that was busy.
+* **CPU is 1.6–1.8× Bun's.** At 128 connections nimony spends 1.75 cores to
+  Bun's 0.96, and on a 4-core box shared with four client processes that is
+  paid for by the clients.
+
+**Mode `paced`: 512 connections at a fixed offered rate** (one message per
+connection per interval, so the server's capacity is never the limit):
+
+| offered rate | server | rate | p50 | p99 | server CPU |
+|---|---|---|---|---|---|
+| 5,120 msg/s | Bun | 5,069 | 3,255 µs | 9,263 µs | 0.07 |
+| 5,120 msg/s | nimony | 4,806 | 2,422 µs | 10,366 µs | 0.15 |
+| 51,200 msg/s | Bun | 48,182 | 784 µs | 4,419 µs | 0.27 |
+| 51,200 msg/s | nimony | 47,818 | 763 µs | 3,235 µs | 0.56 |
+
+At a fixed load the two are level on the median, nimony is **better at the 99th
+percentile** at the higher rate (3.2 ms against 4.4 ms), and it costs 2× the CPU
+of a single-threaded server that is one thread away from its ceiling. That is
+the trade the thread pool makes: twice the CPU, three cores of headroom.
 
 ## What is left
 
+* **The echo is at parity now; the many-connection case is not.** The 66–81% in
+  the scale table is syscall batching: Bun's event loop collects every ready
+  socket in one `epoll_wait` and writes ~32 replies per `sendto`, while the ring
+  does ~3 `io_uring_enter` per ~19-message burst. `IORING_OP_RECV_MULTISHOT`
+  (kernel 6.0+) removes the read re-arm, and submitting a burst's writes without
+  waiting for each would take the third `enter` out; the second was measured in
+  isolation here and was neutral in the flood benchmark, which is why neither is
+  in this change.
+* **The tail.** nimony's p99 is ~1.6× Bun's at high concurrency while its median
+  is better. Three workers each own a lane and only that lane's thread may poll
+  it, so a worker inside a long continuation delays every completion on its own
+  lane; that is also why trampolining a chain inline (measured, −12% CPU) cost
+  throughput.
 * The room's turn ends by flushing its members one after another, and each
   flush waits for its own write, so those waits are sequential. Overlapping
   them — submit the turn's writes, wait once — needs "submit without waiting"
@@ -355,30 +406,13 @@ parse/encode copies. Bun has none of the first two.
   [rejected above](#4-what-was-tried-and-rejected-submit-at-the-end-of-the-cycle)
   is exactly the first half; with the wait kept, a turn's flushes would overlap
   instead of serialising.
-* **The echo's remaining gap is round trips, not CPU.** After the queue work
-  above, the server spends 0.056 s of CPU on a 76 ms round at four client
-  processes: it is idle a third of the time, and the other workers are idle
-  throughout. The workers still poll ~3 times per message and issue one read
-  and one write op per message, because a message arriving alone (the client
-  floods, but Node sends each frame as its own packet) is one completion and
-  one write. Bun's event loop pays one `epoll_wait` for many sockets instead.
-  That is the gap, and it is in the I/O design, not in the scheduler.
-* Allocation is now the largest single block of the echo's CPU (13%,
-  `rawAlloc`/`rawDealloc`, ~6 allocations per message). The frame codec is
-  **~3%** (`validateUtf8` 1.5%, the payload `take` 1.2%, `memcpy` 1.3%) —
-  measured on its own, `parseFrameHeader` is 1 ns, `applyMask` on 15 bytes 4 ns
-  and `frameHeader` with its allocation 4 ns.
-* Two things follow, in order: a write that does not wait for its completion
-  (so the chain submits the next read instead of parking on the write), and
-  fewer suspensions per batch. The first is the deferred-submit variant tried
-  above, which lost *for the room* because the wait formed the next batch — the
-  room now batches itself, so it is worth re-measuring for the echo.
 * The chat's per-message cost is ~2.6 µs, and the channel hop is a large part of
   it: one send, one event construction and one wakeup per message. Batching a
   reader's lines into one event would cut it by the batch size.
 * `publish` walks the topic path with `substr` per segment, and a member's
   subscription is a `seq[string]` — fine for chat-shaped topics, wasteful for
   a hot loop over deep paths. Caching the node in the subscription would do.
+
 
 ## Other things found while writing the server
 
@@ -417,7 +451,9 @@ scripts/build.sh            build bin/chatserver with bin/nimony
 scripts/bench.sh            one configuration: server + N client processes
 scripts/summarize.py        median round time, aggregate rate, server CPU
 scripts/run-all.sh          every configuration, one after another
-scripts/run-interleaved.sh  the table above: A/B alternating, medians
+scripts/run-interleaved.sh  the throughput table: A/B alternating, medians
+scripts/run-scale.sh        the scalability sweep: N connections, RTT, rate
+src/scale-client.mjs        the scalability client (max rate or paced)
 scripts/fetch-bun-bench.sh  re-vendor oven-sh/bun's bench/websocket-server
 vendor/bun-websocket-server/  Bun's files, unmodified
 results/                    raw logs of the saved run, and the strace counts
@@ -429,7 +465,8 @@ results/                    raw logs of the saved run, and the strace counts
 # a nimony checkout with bin/nimony built (hastur build nimony)
 NIMONY=/path/to/nimony scripts/build.sh
 
-scripts/run-interleaved.sh  # the numbers above: Bun and nimony alternating
+scripts/run-interleaved.sh  # the throughput numbers: Bun and nimony alternating
+scripts/run-scale.sh        # the scalability sweep (MODE=paced for a fixed rate)
 scripts/run-all.sh          # every configuration in one sweep
 ```
 
@@ -446,9 +483,12 @@ for the Bun rows. The client script is Bun's own and runs on Node unchanged.
 ## Caveats
 
 * Everything ran on one 4-core machine with server and clients sharing it.
-  Bun's numbers are client-bound at one client process; nimony's are
-  server-bound at every split except the plain echo at four client processes,
-  where the server is idle a third of the round.
+  That is the sharpest limit on the scalability sweep: at 128 connections
+  nimony already spends 1.75 cores, and the four client processes are paying
+  for it. A bigger box would show the thread pool's headroom better.
+* The scalability numbers are per box, not per core: the client processes are
+  the same in every row, so a row says "this server, that many connections, on
+  this machine".
 * `chatserver.nim` is written for the comparison, not as a library: no
   subprotocols, no origin check, no ping/idle handling beyond the echo, no
   limit on room size, and the "ready" broadcast after 32 joins is Bun's

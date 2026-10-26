@@ -48,9 +48,9 @@ nimony), 10 rounds per configuration, 3 repetitions each, medians reported; a
 
 | | before | after (pair API) | after (`Room`) | Bun 1.4.4 |
 |---|---|---|---|---|
-| deliveries/s, 1 client process | 927,248 | 1,626,234 | **2,538,241** | 2,536,238 |
-| deliveries/s, 4 client processes | 824,417 | 1,792,313 | **7,995,201** | 8,117,359 |
-| server CPU per round, 1 process | 4.75 s | 2.85 s | 0.195 s | 0.101 s |
+| deliveries/s, 1 client process | 927,248 | 1,626,234 | **2,466,097** | 2,407,612 |
+| deliveries/s, 4 client processes | 824,417 | 1,792,313 | **7,457,286** | 7,331,348 |
+| server CPU per round, 1 process | 4.75 s | 2.85 s | 0.198 s | 0.108 s |
 | `io_uring_enter` per round | 1,478,997 | 45,595 | **3,558** | 49,765 `sendto` |
 
 Per change, each measured on its own with the pair API at one client process:
@@ -187,6 +187,19 @@ room is neutral. Reverted. (In a `Room` the
 batch comes from the room's queue instead, which is why the room does not need
 the per-frame flush at all.)
 
+### `lib/std/httpserver.nim`, `lib/std/ioring.nim`
+
+* `accept` sets `TCP_NODELAY` on every connection (`setNoDelay`, one ring op).
+  The library never set it, so the kernel could hold a small write until the
+  previous one was acknowledged: for a server that answers in small messages
+  that is one extra round trip per reply, invisible in CPU and in syscall
+  counts and visible only as latency. The plain echo at four client processes
+  went from **676k to 1.03M messages/s** because of this one line, and its
+  p90 at 8 messages in flight fell from 112 µs to 85 µs. Every mainstream
+  server (Node, nginx, Bun) sets it on accept.
+* `setNoDelay` is public, so an application that wants Nagle back can ask for
+  it, and an application on a raw socket can use it without the HTTP layer.
+
 ### `lib/std/threadpool.nim`, `lib/std/ioring/core/backend.nim`
 
 * A lane's deferred ops have one consumer (that lane's `poll`) and, for a
@@ -216,9 +229,12 @@ the per-frame flush at all.)
   handshake, the three length forms, fragments, pings, and the protocol
   violations a server has to refuse.
 * A plain echo server (`src/echoserver.nim`, no room at all) is at
-  313k messages/s against Bun's 311k with one client process, and 676k against
-  1.19M with four, on 1.5× Bun's CPU per message. 15 messages per
-  `io_uring_enter`, against Bun's 33 per `sendto`.
+  297k messages/s against Bun's 252k with one client process (+18%), and
+  1.03M against 1.04M with four, on 1.4× Bun's CPU per message.
+* `scripts/run-scale.sh` holds 32…2048 connections open, each ping-ponging:
+  every connection is accepted (2048/2048, no errors) at 66–81% of Bun's
+  aggregate rate, with a comparable or better median RTT and a p99 ~1.6× worse.
+  At a fixed offered rate the medians match and nimony's p99 is better.
 * `tests/nimony/websocket/troom.nim` (new) — a room over a real socket:
   `ws.publish` reaches every member including the sender, `ws.send` reaches one
   connection only, a publish to a parent topic reaches the topics below it and

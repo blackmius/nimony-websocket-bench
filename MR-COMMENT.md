@@ -16,23 +16,22 @@ publishes and 1,638,400 frame deliveries.
 
 | | nimony | Bun | delta |
 |---|---|---|---|
-| deliveries/s, 1 client process | 2,538,241 (647 ms) | 2,536,238 (641 ms) | +0.1% |
-| deliveries/s, 4 client processes | 7,995,201 (204 ms) | 8,117,359 (199 ms) | −1.5% |
-| server CPU per round, 1 process | 0.195 s | 0.101 s | 1.9× |
-| server CPU per round, 4 processes | 0.126 s | 0.089 s | 1.4× |
+| deliveries/s, 1 client process | 2,466,097 (658 ms) | 2,407,612 (678 ms) | +2.4% |
+| deliveries/s, 4 client processes | 7,457,286 (215 ms) | 7,331,348 (218 ms) | +1.7% |
+| server CPU per round, 1 process | 0.198 s | 0.108 s | 1.8× |
+| server CPU per round, 4 processes | 0.144 s | 0.105 s | 1.4× |
 
 Plain echo: 51,200 messages and 51,200 deliveries per round, no fan-out.
 
 | | nimony | Bun | delta |
 |---|---|---|---|
-| messages/s, 1 client process | 313,275 (162 ms) | 311,316 (162 ms) | +0.6% |
-| messages/s, 4 client processes | 675,817 (76 ms) | 1,186,888 (46 ms) | −43% |
-| messages/s, 2000-byte messages | 169,192 (299 ms) | 151,022 (335 ms) | **+12%** |
+| messages/s, 1 client process | 297,445 (170 ms) | 251,697 (203 ms) | **+18.2%** |
+| messages/s, 4 client processes | 1,026,582 (53 ms) | 1,038,679 (51 ms) | −1.2% |
+| messages/s, 2000-byte messages | 147,904 (344 ms) | 133,921 (381 ms) | **+10.4%** |
 
 Start of this round, for comparison: chat 4×8 was 7.40 M, echo 1×32 297 k,
-echo 4×8 603–637 k. So the chat is at parity, the echo at one client process is
-at parity, the echo with big messages is ahead, and the echo at four client
-processes is the one still behind.
+echo 4×8 603–637 k. So the chat and the echo are both at parity or ahead now,
+and the one row that was 43% behind is fixed — see the Nagle section below.
 
 ## What this round changed
 
@@ -56,6 +55,8 @@ runtime's queues took a `SysLock` per operation.
   stripe (which is the locked half of the queue).
 * **Counters** moved behind `-d:threadpoolMetrics`; without it `countMetric`
   compiles to nothing and `workerMetrics` is never allocated.
+* **`TCP_NODELAY` on accept** (`httpserver.accept` → `setNoDelay`, one ring op
+  per connection). This is the one that fixed the echo; see below.
 
 Instructions per echoed message (callgrind, same workload):
 
@@ -81,63 +82,67 @@ io_uring lane while it runs: every deferred poll is deferred latency. The chat
 is neutral. Reverted, with the numbers recorded so the next attempt starts from
 them.
 
-## The four-process echo: what it is, and what it is not
+## The four-process echo: it was Nagle
 
-It is **not capacity**. Give the same server more connections and it matches
-Bun:
+The one row that was behind has nothing to do with any of the above. The
+library never set `TCP_NODELAY`, so the kernel could hold a small write until
+the previous one had been acknowledged: for a server that answers in small
+messages, one extra round trip per reply. It is invisible in CPU (the server was
+idle a third of the round either way) and invisible in the syscall counts — it
+shows up only as a latency that does not fall with concurrency, which is exactly
+what the measurements said:
 
-| echo configuration | nimony | Bun |
+| | before | after `setNoDelay` |
 |---|---|---|
-| 4 client procs × 8 connections | 675,817 | 1,186,888 |
-| 4 client procs × 32 connections | 980,222 / 1,016,940 | 1,146,013 / 1,026,996 |
-| 2 client procs × 32 connections | 592,951 / 579,295 | 596,039 / 610,383 |
+| echo, 4 client processes | 675,817 | **1,026,582** |
+| echo, 1 client process | 313,275 | 297,445 |
+| RTT, 8 messages in flight, mean | 145 µs | 52 µs |
+| RTT, 8 in flight, p90 | 112 µs | 85 µs |
 
-At 128 connections nimony reaches 88–99% of Bun; at 32 it reaches 57%. So what
-the 4×8 row measures is **per-message latency at low concurrency**, not
-throughput: nimony needs ~4× the in-flight messages to saturate.
+`httpserver.accept` now calls `setNoDelay` (one ring op per connection), and the
+whole benchmark set is at parity or ahead: chat +2.4% at one client process and
++1.7% at four, echo +18% at one and −1.2% at four, echo with 2000-byte messages
++10%.
 
-It is **not CPU** either. Per-thread accounting (the harness sums the threads)
-shows the three workers balanced — 0.22 s / 0.22 s / 0.19 s over a ten-round
-run — and each one busy only ~28% of a 76 ms round.
+Before finding it, four other explanations were measured and rejected: not
+parking on the write (647–670k, no change), bigger read chunks (627–654k, no
+change), busy-polling instead of sleeping (415k, worse — the workers take the
+clients' cores), and running a chain's steps inline (−12% CPU, −13% throughput,
+because a worker cannot poll its own io_uring lane while it runs).
 
-It is **not syscalls**. `strace -c` over the same workload: nimony 2,729
-`io_uring_enter` per round against Bun's 3,070 (`recvfrom` + `sendto` +
-`epoll_pwait2`). And it is not the client: the four Node processes spend 2.64 s
-against nimony and 2.38 s against Bun for the same work.
+## Scalability: how many connections
 
-Measured latency, one connection, strict ping-pong (`hrtime`, 4000 samples):
+`scripts/run-scale.sh` holds N connections open and has each of them ping-pong
+back to back, so the row is "this many clients, at this rate, with this RTT":
 
-| | 1 in flight | 8 in flight |
-|---|---|---|
-| nimony | p50 48.4 µs, mean 52 µs | p50 46.2 µs, mean 145 µs |
-| Bun | p50 45.4 µs, mean 49.5 µs | p50 41.8 µs, mean 55 µs |
+| connections | Bun rate | nimony rate | ratio | Bun p99 | nimony p99 |
+|---|---|---|---|---|---|
+| 32 | 170,303 | 137,394 | 81% | 480 µs | 638 µs |
+| 128 | 357,543 | 260,586 | 73% | 960 µs | 2,500 µs |
+| 512 | 400,202 | 287,716 | 71% | 4,307 µs | 7,015 µs |
+| 2048 | 315,491 | 208,598 | 66% | 14,524 µs | 22,768 µs |
 
-At one message in flight the two are the same. Under pipelining nimony's mean
-triples while Bun's does not: its per-message latency does not fall with
-concurrency, so throughput stays `in-flight / 47 µs` while Bun's becomes
-`in-flight / 27 µs`.
+Every connection is held by both (2048/2048, zero errors). nimony's median RTT
+is comparable — better at 512 (968 µs against 1,081 µs) — its tail is ~1.6×
+worse, and it spends 1.6–1.8× the CPU.
 
-Three things were tried against this and rejected on measurement:
+At a **fixed** offered rate, with the server's capacity never the limit, the
+picture is the one the thread pool is for: 512 connections at 51,200 msg/s
+offered, both at ~48k delivered, median 763 µs (nimony) against 784 µs (Bun),
+p99 **3.2 ms against 4.4 ms** — and nimony at 0.56 cores against Bun's 0.27.
 
-* **Do not park on the write.** `writeFd` copied the bytes and submitted the
-  write fire-and-forget (throwaway patch, buffer ownership not addressed):
-  647–670 k, no change.
-* **Bigger read bursts.** `ChunkSize` 4 KB / 16 KB / 64 KB: 627–654 k, no
-  change.
-* **Never sleep in the kernel.** Forcing the reactor to busy-poll instead of
-  `submitAndWait` made it *worse* — 415 k — because three spinning workers take
-  the cores the four client processes need. The server has idle CPU, but that
-  CPU is not free.
+The gap in the `max` rows is syscall batching: one `epoll_wait` collects every
+ready socket and one `sendto` carries ~32 replies, while the ring does ~3
+`io_uring_enter` per burst of ~19 messages. That is the next thing to attack
+(`IORING_OP_RECV_MULTISHOT`, and submitting a burst's writes without waiting for
+each).
 
-What is left is the chain itself: a message costs a read completion, a pool
-dispatch of the resumed continuation, the parse/append, and a write op — and at
-32 connections there is not enough in flight to hide that. Bun's single-thread
-loop does the same work in one wakeup with no cross-thread dispatch. The
-promising directions are therefore fewer pool hops per completion (run the
-resumed step in `deliver` instead of re-queueing it — worth re-measuring now
-that the queues are lock-free) and fewer continuations per message (the echo
-path takes ~20), not more threads or more CPU.
+## What is left
 
-Two smaller items: allocation is now the largest single block of the echo's CPU
-(13%, ~6 allocations per message), and a chain still takes ~20 queue round
-trips per message, which is what the trampoline above was trying to fix.
+* Syscall batching for the many-connection case, as above.
+* The tail: a worker cannot poll its own lane while it runs a continuation, so
+  a long chain delays every completion on that lane.
+* Allocation is still ~13% of the echo's CPU (~6 coroutine frames per message,
+  one per nested `.passive` call). A per-thread frame cache was tried and
+  measured *worse* — chains migrate between workers, so freed frames pile up in
+  the wrong thread's cache.
