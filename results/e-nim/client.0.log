@@ -1,22 +1,22 @@
-32 clients connected, 1600 msgs each, 51200 echoes per round
-round  1:    190.8 ms     268400 msg/s
-round  2:    160.5 ms     319087 msg/s
-round  3:    149.1 ms     343432 msg/s
-round  4:    147.2 ms     347862 msg/s
-round  5:    155.3 ms     329746 msg/s
-round  6:    164.9 ms     310447 msg/s
-round  7:    148.6 ms     344547 msg/s
-round  8:    148.8 ms     344097 msg/s
-round  9:    152.2 ms     336387 msg/s
-round 10:    149.2 ms     343187 msg/s
-round 11:    150.6 ms     339972 msg/s
-round 12:    151.4 ms     338244 msg/s
-round 13:    180.0 ms     284401 msg/s
-round 14:    163.3 ms     313581 msg/s
-round 15:    183.8 ms     278591 msg/s
-round 16:    159.8 ms     320410 msg/s
-round 17:    156.8 ms     326632 msg/s
-round 18:    157.6 ms     324857 msg/s
-round 19:    178.8 ms     286414 msg/s
-round 20:    167.6 ms     305516 msg/s
-{"median":326632,"rates":[268400,278591,284401,286414,305516,310447,313581,319087,320410,324857,326632,329746,336387,338244,339972,343187,343432,344097,344547,347862]}
+8 clients connected, 1600 msgs each, 12800 echoes per round
+round  1:    178.8 ms      71605 msg/s
+round  2:     66.1 ms     193725 msg/s
+round  3:     58.8 ms     217774 msg/s
+round  4:     61.9 ms     206873 msg/s
+round  5:     45.2 ms     283349 msg/s
+round  6:     47.9 ms     266988 msg/s
+round  7:     45.8 ms     279520 msg/s
+round  8:     55.9 ms     229173 msg/s
+round  9:     48.9 ms     261984 msg/s
+round 10:     42.5 ms     300926 msg/s
+round 11:     34.0 ms     376154 msg/s
+round 12:     32.3 ms     395928 msg/s
+round 13:     47.1 ms     271995 msg/s
+round 14:     52.4 ms     244230 msg/s
+round 15:     27.8 ms     460251 msg/s
+round 16:     33.0 ms     388268 msg/s
+round 17:     52.1 ms     245566 msg/s
+round 18:     58.1 ms     220192 msg/s
+round 19:     32.2 ms     397211 msg/s
+round 20:     57.7 ms     221774 msg/s
+{"median":266988,"rates":[71605,193725,206873,217774,220192,221774,229173,244230,245566,261984,266988,271995,279520,283349,300926,376154,388268,395928,397211,460251]}

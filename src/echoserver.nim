@@ -71,6 +71,18 @@ proc main =
   ignoreSigPipe()
   initIoRing()
   submit(delay(serve(uint16(envInt("PORT", 4001)))), 0)
-  while true: sleep 1000
+  # EXIT_AFTER_S > 0 makes the process leave on its own, which a profiler
+  # (callgrind, massif) needs: killed by a signal, it writes nothing.
+  let exitAfter = envInt("EXIT_AFTER_S", 0)
+  var elapsed = 0
+  while true:
+    sleep 1000
+    inc elapsed
+    when defined(allocStats):
+      for i in 0 ..< 128:
+        if gStatCount[i] > 0:
+          stderr.write "  ~" & $(i * 64) & " B: " & $gStatCount[i] & " blocks, " &
+                       $(gStatBytes[i] div 1024) & " KB\n"
+    if exitAfter > 0 and elapsed >= exitAfter: break
 
 main()

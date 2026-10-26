@@ -91,6 +91,28 @@ worker instead of re-queueing them) cuts the echo's CPU by 12% and its
 throughput by 13%: a worker cannot poll its own io_uring lane while it runs, so
 every deferred poll is deferred latency. Reverted.
 
+## Holding connections
+
+`scripts/run-conns.sh`: 8192 connections, one echo each, then held idle.
+
+| server | server RSS per connection | idle CPU |
+|---|---|---|
+| Bun `Bun.serve` | **1.7 KB** | 0.04 cores |
+| nimony, before | 12.0 KB | 0.05 cores |
+| nimony, after | **9.0 KB** | 0.06 cores |
+
+Four causes, found by counting the allocator's live blocks per size class:
+a 2.5 KB DEFLATE histogram inline in every `HttpConnection` (3320 → 824 bytes
+once the histograms moved to the heap); a 16 KB read buffer reserved per
+connection and rounded to a 36 KB chunk by the allocator (now 1 KB, doubling to
+16 KB only while a peer fills it); the same eager 8 KB + 8 KB buffers in
+`std/socket`; and a listen backlog default of 128, which lost 19% of an
+8192-connection storm to dropped SYNs.
+
+A million connections would need ~9 GB of server memory (Bun: 1.7 GB); this box
+has 1.7 GB free, and its loopback port range (28,231 ports) stops the sweep at
+28,228 connections held — the same number for both servers.
+
 ## Many connections
 
 `scripts/run-scale.sh`: N connections, each ping-ponging back to back, 8 s,

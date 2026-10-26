@@ -50,7 +50,7 @@ Reading the table:
 
 ## What was changed
 
-Six changes, in the order they were made and measured. Each one is in the
+Seven changes, in the order they were made and measured. Each one is in the
 nimony tree; the numbers are the per-connection server at one client process
 (`conn-1x32` in `results/`), because that is the one that was being optimised
 at each step.
@@ -148,6 +148,33 @@ counts look fine, it is just idle. `httpserver.accept` now calls `setNoDelay`
 (one ring op per connection), and the echo benchmark went from 676k to 1.03M
 messages/s at four client processes. See
 [the echo section](#plain-echo-no-fan-out-at-all).
+
+### 7. The many-connection regime: run the chain, and stop hashing the fd
+
+The first six were measured on the flood benchmark, where one poll carries ~19
+messages. The many-connection case is the opposite shape — one message in
+flight per connection, so one completion per poll — and there the server spent
+**5.7 µs of CPU per message against 1.1 µs in the flood**, for the same code.
+A callgrind profile of that regime named two things:
+
+* **`submit` was 24% of the instructions: 16 calls per message.** Every step of
+  a `.passive` chain was submitted to the work-stealing deque and popped again
+  — two atomics, a division and a call per frame, eight frames per echo. The
+  drain loop now runs a chain's next steps inline (`trampolineSteps`), and
+  stops the moment the backend says a completion is already published
+  (`gReactorHasReady`) so that nothing sits in the ring waiting for a worker
+  that is busy unwinding a chain. 512 connections: **275k → 303k msg/s, CPU
+  1.62 → 1.44 cores** (medians of three alternating pairs).
+* **The slot arena keyed its per-fd lists by a `Table[cint, nil Slot]`**, one
+  hash, one insert and one backshifting delete per op — `del` alone was 14.6%
+  of instructions. A descriptor is already a small dense integer, so the heads
+  are a `seq[nil Slot]` indexed by `fd + 1` (the +1 for the ops that have no
+  descriptor: `opTimeout` and `opNop` carry `fd = -1`, which a table accepted
+  and an array does not). That was another **+8%** on the same benchmark.
+
+Two other ideas were measured and rejected in that regime: spinning in the poll
+loop instead of blocking (rate and CPU identical — the wakeup was never the
+cost) and submitting the write without parking on it (neutral).
 
 ## The runtime: two queues that no longer lock
 
@@ -384,6 +411,71 @@ percentile** at the higher rate (4.7 ms against 5.6 ms), and it costs 2× the CP
 of a single-threaded server that is one thread away from its ceiling. That is
 the trade the thread pool makes: twice the CPU, three cores of headroom.
 
+## Holding connections: what each one costs
+
+A chat server is bought for "how many clients", so that is a number worth
+measuring directly rather than inferring from throughput. `scripts/run-conns.sh`
+opens N connections, does one echo on each, then holds them all open and quiet,
+and reports the server's RSS per connection. `bin/raw-hold-client` is the
+driver: a hand-written handshake on a raw socket, because a Node WebSocket
+costs ~30 KB per connection and would cap the experiment at a few thousand no
+matter what the server can do.
+
+8192 connections, one echo each, then idle:
+
+| server | held | server RSS | per connection | idle CPU |
+|---|---|---|---|---|
+| Bun `Bun.serve` | 8192 / 8192 | +14 MB | **1.7 KB** | 0.04 cores |
+| nimony, before this round | 8192 / 8192 | +98 MB | 12.0 KB | 0.05 cores |
+| nimony, after | 8192 / 8192 | +72 MB | **9.0 KB** | 0.06 cores |
+
+(Idle CPU is flat in the connection count: it is the pool's periodic wakeup,
+~0.05 cores, not a per-connection cost.)
+
+Four things were holding the number down, all of them found by counting the
+allocator's live blocks per size class (`-d:allocStats`) rather than by
+guessing:
+
+1. **A DEFLATE histogram in every connection.** `Deflater` kept its symbol
+   frequencies inline — `array[286, int]` plus `array[30, int]`, 2.5 KB — and
+   `Encoder` is a field of `HttpConnection`. So every connection carried the
+   compressor's working set for a feature that is off by default.
+   `sizeof(HttpConnection)` was **3320 bytes**; with the histograms on the heap
+   it is **824**. The arrays are still allocated once per *compressing* stream,
+   which is the only place they were ever used.
+2. **A 16 KB read buffer per connection.** `readFd` reserved `ChunkSize` of
+   spare room before every read, and the reservation is what the buffer keeps —
+   so 8000 quiet clients held 8000 sixteen-kilobyte buffers to receive forty
+   bytes. The allocator's big-chunk classes rounded each to **36 KB**. The read
+   step now starts at `MinRead` (1 KB) and doubles only while a read comes back
+   full, up to `ChunkSize`: a quiet connection keeps 1 KB, a flooding one is at
+   16 KB reads within five reads.
+3. **The same disease in `std/socket`.** `initSocket` allocated an 8 KB read
+   buffer and an 8 KB write buffer eagerly; both are now allocated by the first
+   `fill`/`scratch` that needs one. That is what took the *driver* from 30 KB to
+   14 KB per connection, and it is why the sweep can reach tens of thousands.
+4. **A listen backlog of 128.** `listenHttp`'s default was 128, so a client
+   opening 8192 connections at once overflowed it and **19% of them were lost**
+   to dropped SYNs — the server looked like it could not accept a storm. At
+   4096 the same run lost none, and the default is now 1024 (nginx and Node use
+   511). This one is not memory at all, but it is the difference between
+   "accepts 8192 connections" and "accepts 6630 of them".
+
+What is left is ~9 KB for an upgraded, idle connection against 4.6 KB for one
+that only accepts and parks, so roughly half is the WebSocket object, the
+parked echo chain and the writer's outbox. The next steps, in order: reuse the
+per-connection objects from a per-lane pool (they are all freed on close, and a
+connection is accepted and closed in the same lane), shrink the frames (the
+echo frame holds a whole `WebSocket` by value), and the allocator's page
+granularity — a 2 KB chunk still touches a 4 KB page.
+
+**A million connections is not testable on this machine**, and the arithmetic
+says why: at 9.0 KB each it would need ~9 GB of server memory (Bun: ~1.7 GB),
+and the box has 1.7 GB free. It also needs ~1M ephemeral ports, and the
+loopback range here is 28,231 — which is exactly where the sweep stops: 32,768
+asked, **28,228 held, both servers, the same number**, because the client ran
+out of ports before either server ran out of anything.
+
 ## What is left
 
 * **The echo is at parity now; the many-connection case is not.** The 66–81% in
@@ -453,7 +545,11 @@ scripts/summarize.py        median round time, aggregate rate, server CPU
 scripts/run-all.sh          every configuration, one after another
 scripts/run-interleaved.sh  the throughput table: A/B alternating, medians
 scripts/run-scale.sh        the scalability sweep: N connections, RTT, rate
+scripts/run-conns.sh        how many connections are held, and RSS per one
 src/scale-client.mjs        the scalability client (max rate or paced)
+src/raw-hold-client.nim     connection holder: hand-written handshake, ~14 KB/conn
+src/hold-client.nim         the same through std/websocket, for comparison
+src/holdserver.nim          accept-and-park server: the floor a connection costs
 scripts/fetch-bun-bench.sh  re-vendor oven-sh/bun's bench/websocket-server
 vendor/bun-websocket-server/  Bun's files, unmodified
 results/                    raw logs of the saved run, and the strace counts
@@ -467,6 +563,7 @@ NIMONY=/path/to/nimony scripts/build.sh
 
 scripts/run-interleaved.sh  # the throughput numbers: Bun and nimony alternating
 scripts/run-scale.sh        # the scalability sweep (MODE=paced for a fixed rate)
+scripts/run-conns.sh 8192 ./bin/echoserver   # connections held, RSS per connection
 scripts/run-all.sh          # every configuration in one sweep
 ```
 

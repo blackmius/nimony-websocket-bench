@@ -56,7 +56,7 @@ for (let i = 0; i < CONNS; i++) {
   socks[i] = ws;
   ws.onopen = () => {
     opened++;
-    if (MODE === "max") sendOn(i);
+    if (MODE === "max" || MODE === "idle") sendOn(i);
   };
   ws.onmessage = () => {
     recv++;
