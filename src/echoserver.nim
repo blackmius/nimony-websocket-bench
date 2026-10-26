@@ -26,15 +26,22 @@ proc echo(c: sink HttpConnection) {.passive.} =
   if not c.next(): return
   try:
     var ws = upgradeWebSocket(c)
+    # `msg` lives outside the loop: the reader fills the caller's buffer in
+    # place, so a message costs no allocation once it has grown to size.
+    var msg = ""
     while true:
-      var msg = ""
       let kind = ws.recv(msg)
       case kind
       of mkText, mkBinary:
         # `flush = false`: the reply joins the buffer, and `recv` flushes it
         # when the connection has nothing more buffered — one write for a
         # burst of echoes instead of one per message.
-        ws.send(kind, msg, flush = false)
+        when defined(binaryEcho):
+          # Measurement only: echoing as binary skips the UTF-8 check that
+          # `send` does on the way out, which is the check `recv` just did.
+          ws.send(mkBinary, msg, flush = false)
+        else:
+          ws.send(kind, msg, flush = false)
       of mkClose:
         break
       else:

@@ -27,13 +27,13 @@ One round is 32 clients × 1600 messages each, every message fanned out to all
 
 | server | client procs | round | deliveries/s | server CPU |
 |---|---|---|---|---|
-| Bun `Bun.serve` | 1 × 32 | 641 ms | **2,510,418** | 0.51 s |
-| Bun `Bun.serve` | 4 × 8 | 226 ms | **7,294,423** | 0.47 s |
-| nimony, `Room` | 1 × 32 | 605 ms | **2,660,163** | 0.74 s |
-| nimony, `Room` | 2 × 16 | 345 ms | **4,622,467** | 0.56 s |
-| nimony, `Room` | 4 × 8 | 245 ms | **6,429,569** | 0.56 s |
-| nimony, writer per connection | 1 × 32 | 635 ms | **2,461,348** | 7.20 s |
-| nimony, writer per connection | 4 × 8 | 615 ms | **2,619,109** | 6.18 s |
+| Bun `Bun.serve` | 1 × 32 | 604 ms | **2,664,003** | 0.47 s |
+| Bun `Bun.serve` | 4 × 8 | 224 ms | **7,209,539** | 0.45 s |
+| nimony, `Room` | 1 × 32 | 588 ms | **2,761,565** | 0.74 s |
+| nimony, `Room` | 2 × 16 | 336 ms | **4,754,812** | 0.60 s |
+| nimony, `Room` | 4 × 8 | 234 ms | **6,604,569** | 0.79 s |
+| nimony, writer per connection | 1 × 32 | 635 ms | **2,510,936** | 6.06 s |
+| nimony, writer per connection | 4 × 8 | 508 ms | **3,107,586** | 4.68 s |
 
 Per single message (one connection, 1600 round trips, no fan-out):
 nimony **32,228 msg/s** (~50 ms per 1600 round trips, ~31 µs each),
@@ -224,18 +224,24 @@ round is 32 × 1600 = 51,200 messages and 51,200 deliveries.
 
 | | round | messages/s | server CPU per round | per message |
 |---|---|---|---|---|
-| Bun `Bun.serve` | 168 ms | **282,549** | 0.114 s | 2.23 µs |
-| nimony `std/websocket` | 165 ms | **297,443** | 0.120 s | 2.34 µs |
-| Bun `Bun.serve` | 65 ms | **855,261** | 0.038 s | 0.74 µs |
-| nimony `std/websocket` | 98 ms | **536,031** | 0.062 s | 1.21 µs |
+| Bun `Bun.serve` | 164 ms | **307,211** | 0.106 s | 2.07 µs |
+| nimony `std/websocket` | 162 ms | **311,357** | 0.112 s | 2.19 µs |
+| Bun `Bun.serve` | 70 ms | **822,282** | 0.032 s | 0.62 µs |
+| nimony `std/websocket` | 88 ms | **617,300** | 0.064 s | 1.25 µs |
+| Bun, 2000-byte messages | 324 ms | **150,563** | 0.168 s | 3.28 µs |
+| nimony, 2000-byte messages | 291 ms | **168,461** | 0.222 s | 4.34 µs |
+(upper rows: one client process, lower rows: four; the last two are 2000-byte
+messages, one client process)
 
-(upper rows: one client process, lower rows: four)
-
-So with one client process nimony is level with Bun on a plain echo (it was
-ahead on the previous run, so the two are within the noise of this box), and
-with four it is at 63% on 1.6× Bun's CPU per message. The syscalls are not the
-problem: 3,436 `io_uring_enter` per round is **15 messages per write**, against
-Bun's 33 per `sendto`.
+So with one client process nimony is level with Bun on a plain echo
+(311,357 against 307,211), and with four it is at
+75% on 2.0× Bun's CPU per message. The last two rows are the
+same echo with 2000-byte messages, which spreads the per-message cost over 133
+times more bytes: there **nimony is ahead** (168,461 against
+150,563). So the per-byte path — copy, unmask, frame — is already better than
+Bun's, and what is left is the fixed cost of a message: the frame parse, the two
+`.passive` calls and the chain bookkeeping. Skipping the second UTF-8 check
+(echoing as binary) measured *slower*, so that is not it.
 
 Getting there needed one thing: **an echo reply must not be its own syscall.**
 The pair's `recv` flushes before it parks — that is the safety net that keeps a
@@ -255,8 +261,15 @@ while true:
   else: discard
 ```
 
-That halved the server's CPU on the echo benchmark (0.56 s → 0.33 s per 5
-rounds at four client processes) and moved it from 76% to level with Bun at one.
+That halved the server's CPU on the echo benchmark (0.56 s → 0.32 s per 5
+rounds at four client processes) and moved it to level with Bun at one client
+process.
+
+Two smaller things went in with it: a client's frames are unmasked eight bytes
+at a time instead of one, and `recv` assembles the message in the caller's own
+string instead of a buffer of the reader's that was freed and copied out on
+every message — so a handler that keeps its `msg` across calls allocates
+nothing per message.
 
 What is left per message is the runtime's cost, not the socket path: two
 `.passive` calls per message (`recv` and `send`), a UTF-8 check on the way in

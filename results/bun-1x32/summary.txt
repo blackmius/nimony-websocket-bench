@@ -1,1 +1,1 @@
-bun-1x32               1 client proc(s)  round=  641.2 ms  aggregate=  2510418 msg/s  server_cpu=  0.51s  alive=yes
+bun-1x32               1 client proc(s)  round=  604.1 ms  aggregate=  2664003 msg/s  server_cpu=  0.47s  alive=yes

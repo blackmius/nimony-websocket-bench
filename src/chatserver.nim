@@ -67,8 +67,10 @@ proc chat(c: sink HttpConnection) {.passive.} =
     counted = true
     if atomicFetchAdd(joined, 1, moRelaxed) + 1 == clientsToWaitFor:
       submit(delay(announce()), -1)
+    # `msg` lives outside the loop: the reader fills the caller's buffer in
+    # place, so a message costs no allocation once it has grown to size.
+    var msg = ""
     while true:
-      var msg = ""
       let kind = ws.recv(msg)
       case kind
       of mkText, mkBinary:

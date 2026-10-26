@@ -25,5 +25,12 @@ fi
 scripts/bench.sh echo-nimony-1x32 1 32 ./bin/echoserver
 scripts/bench.sh echo-nimony-4x8  4  8 ./bin/echoserver
 
+# The same, with 2000-byte messages: the per-byte part of the cost on its own,
+# with the per-message part spread over 133 times more bytes.
+if [ "$havebun" = yes ]; then
+  MSG_SIZE=2000 scripts/bench.sh echo-bun-big-1x32 1 32 bun src/echo-server.bun.js
+fi
+MSG_SIZE=2000 scripts/bench.sh echo-nimony-big-1x32 1 32 ./bin/echoserver
+
 echo
 cat results/echo-*/summary.txt

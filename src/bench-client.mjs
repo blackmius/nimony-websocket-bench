@@ -13,6 +13,9 @@ const TOTAL_CLIENTS = parseInt(env.TOTAL_CLIENTS || "", 10) || CLIENTS;
 const ROUNDS = parseInt(env.ROUNDS || "", 10) || 10;
 const PER_CLIENT = parseInt(env.MESSAGES || "", 10) || 1600;
 
+// MSG_SIZE pads every message to that many bytes, for measuring the per-byte
+// part of a message's cost apart from the per-message part.
+const MSG_SIZE = parseInt(env.MSG_SIZE || "", 10) || 0;
 const MESSAGES_TO_SEND = Array.from({ length: 32 }, () => [
   "Hello World!", "Hello World! 1", "Hello World! 2", "Hello World! 3",
   "Hello World! 4", "Hello World! 5", "Hello World! 6", "Hello World! 7",
@@ -26,7 +29,8 @@ const MESSAGES_TO_SEND = Array.from({ length: 32 }, () => [
   "Hello World! 9", "What is the meaning of life?", "where is the bathroom?",
   "zoo", "kangaroo", "erlang", "elixir", "bun", "mochi", "typescript",
   "javascript",
-]).flat().slice(0, PER_CLIENT);
+]).flat().slice(0, PER_CLIENT)
+  .map(m => MSG_SIZE > m.length ? m + "x".repeat(MSG_SIZE - m.length) : m);
 
 const NAMES = Array.from({ length: 50 }, (a, i) => [
   "Alice" + i, "Bob" + i, "Charlie" + i, "David" + i, "Eve" + i,

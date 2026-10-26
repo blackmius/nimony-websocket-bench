@@ -40,8 +40,8 @@ Median of 5 rounds, `nimony c -d:release`, 4-core aarch64.
 
 | | before | after (pair API) | after (`Room`) | Bun 1.4.4 |
 |---|---|---|---|---|
-| deliveries/s, 1 client process | 927,248 | 2,461,348 | **2,660,163** | 2,510,418 |
-| deliveries/s, 4 client processes | 824,417 | 2,619,109 | **6,429,569** | 7,294,423 |
+| deliveries/s, 1 client process | 927,248 | 2,510,936 | **2,761,565** | 2,664,003 |
+| deliveries/s, 4 client processes | 824,417 | 3,107,586 | **6,604,569** | 7,209,539 |
 | server CPU per round, 1 process | 4.75 s | 1.44 s | 0.15 s | 0.10 s |
 | `io_uring_enter` per round | 1,478,997 | 45,595 | **3,558** | 49,765 `sendto` |
 
