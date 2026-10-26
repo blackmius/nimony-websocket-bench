@@ -24,6 +24,7 @@ DURATION=${DURATION:-8}
 PROCS=${PROCS:-4}
 INTERVAL_MS=${INTERVAL_MS:-100}
 REPS=${REPS:-2}
+NIMONY_BIN=${NIMONY_BIN:-./bin/echoserver}
 
 out="$ROOT/results/scale"
 mkdir -p "$out"
@@ -85,6 +86,6 @@ echo -e "server\tconns\topened\trate\tp50us\tp99us\terrors\tcpu"
 for conns in $CONNS_LIST; do
   for ((r = 0; r < REPS; r++)); do
     measure "$MODE-bun-$conns-r$r" "$conns" bun src/echo-server.bun.js | grep '^RESULT' | cut -f2-
-    measure "$MODE-nimony-$conns-r$r" "$conns" ./bin/echoserver | grep '^RESULT' | cut -f2-
+    measure "$MODE-nimony-$conns-r$r" "$conns" "$NIMONY_BIN" | grep '^RESULT' | cut -f2-
   done
 done
