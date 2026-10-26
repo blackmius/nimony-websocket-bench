@@ -73,9 +73,11 @@ Level with Bun at one client process, 60% at four, on 2.6× Bun's CPU per
 message. With 2000-byte messages (per-message cost spread over 133× more bytes)
 nimony is ahead: 160,921 against 143,880 msg/s.
 
-What is left per message is the runtime, not the socket: two `.passive` calls
-per message and a UTF-8 check on the way in *and* on the way out (an echo
-validates the same bytes twice).
+What is left per message is the runtime, not the socket. A callgrind profile
+puts ~60% of the echo server's CPU in the pool's scheduler (`drainOnce`,
+`submit`, `flushStaged`, stripe mutexes, atomics) and the frame codec at ~10 ns
+per message; the server is idle ~50% of the wall time, so the echo is
+latency-bound on the task hand-off per batch, not CPU-bound on the frame path.
 
 ## What is left
 

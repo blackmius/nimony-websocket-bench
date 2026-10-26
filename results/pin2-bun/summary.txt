@@ -1,1 +1,0 @@
-pin2-bun               4 client proc(s)  round=   63.7 ms  aggregate=   784221 msg/s  server_cpu=  0.25s  alive=yes

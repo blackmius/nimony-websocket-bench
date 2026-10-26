@@ -290,9 +290,23 @@ parse/encode copies. Bun has none of the first two.
   [rejected above](#4-what-was-tried-and-rejected-submit-at-the-end-of-the-cycle)
   is exactly the first half; with the wait kept, a turn's flushes would overlap
   instead of serialising.
-* The channel hop per message: one ticket-lock round trip and a 24-byte copy.
-  Batching a reader's lines before handing them to the room would cut it by the
-  batch size, at the cost of an allocation per batch.
+* **The echo's remaining gap is the runtime, not the socket path.** A callgrind
+  profile of the echo server puts ~60% of its CPU in the pool's scheduler —
+  `drainOnce`, `submit`, `flushStaged`, the stripe mutexes and the atomics — and
+  the frame codec at ~10 ns per message (measured on its own: `parseFrameHeader`
+  1 ns, `applyMask` on 15 bytes 4 ns, `frameHeader` with its allocation 4 ns).
+  The server is also idle ~50% of the wall time, and pinning it to one core
+  drops its CPU by 30% without changing the throughput: the echo is
+  *latency*-bound, one task hand-off per read→process→write batch.
+* Two things follow, in order: a write that does not wait for its completion
+  (so the chain submits the next read instead of parking on the write), and
+  fewer suspensions per batch. The first is the deferred-submit variant tried
+  above, which lost *for the room* because the wait formed the next batch — the
+  room now batches itself, so it is worth re-measuring for the echo. The second
+  is the pool's, not this module's.
+* The chat's per-message cost is ~2.6 µs, and the channel hop is a large part of
+  it: one send, one event construction and one wakeup per message. Batching a
+  reader's lines into one event would cut it by the batch size.
 * `publish` walks the topic path with `substr` per segment, and a member's
   subscription is a `seq[string]` — fine for chat-shaped topics, wasteful for
   a hot loop over deep paths. Caching the node in the subscription would do.
