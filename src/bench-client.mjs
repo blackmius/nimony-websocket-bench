@@ -67,12 +67,18 @@ function barrier(round) {
   }
 }
 
+// READY=0 starts sending as soon as the sockets are open instead of waiting
+// for the server's "ready". The per-message measurement needs it: there the
+// server publishes to a topic per connection, so there is no broadcast to
+// announce with.
+const WAIT_READY = env.READY !== "0";
 const connected = [];
 for (let i = 0; i < CLIENTS; i++) {
   const ws = new WebSocket(`${SERVER}?name=${NAMES[i]}`);
   clients[i] = ws;
   connected.push(new Promise((resolve, reject) => {
-    ws.onmessage = () => resolve();          // the server's "ready"
+    if (WAIT_READY) ws.onmessage = () => resolve();   // the server's "ready"
+    else ws.onopen = () => resolve();
     ws.onerror = e => reject(new Error("connect failed: " + e.message));
   }));
 }

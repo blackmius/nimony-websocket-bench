@@ -1,7 +1,7 @@
 8 clients connected, 1600 msgs each, 409600 echoes per round
-round  1:    713.2 ms     574273 msg/s
-round  2:    720.8 ms     568241 msg/s
-round  3:    651.1 ms     629061 msg/s
-round  4:    564.6 ms     725489 msg/s
-round  5:    691.0 ms     592782 msg/s
-{"median":592782,"rates":[568241,574273,592782,629061,725489]}
+round  1:    610.2 ms     671257 msg/s
+round  2:    522.1 ms     784459 msg/s
+round  3:    506.2 ms     809238 msg/s
+round  4:    576.0 ms     711094 msg/s
+round  5:    465.0 ms     880928 msg/s
+{"median":784459,"rates":[671257,711094,784459,809238,880928]}

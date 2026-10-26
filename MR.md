@@ -40,10 +40,10 @@ Median of 5 rounds, `nimony c -d:release`, 4-core aarch64.
 
 | | before | after (pair API) | after (`Room`) | Bun 1.4.4 |
 |---|---|---|---|---|
-| deliveries/s, 1 client process | 927,248 | 2,524,746 | **2,638,737** | 2,541,884 |
-| deliveries/s, 4 client processes | 824,417 | 2,449,155 | **6,286,334** | 7,291,716 |
-| server CPU per round, 1 process | 4.75 s | 1.40 s | 0.12–0.17 s | ~0.09 s |
-| `io_uring_enter` per round | 1,478,997 | 45,595 | **3,296** | 49,765 `sendto` |
+| deliveries/s, 1 client process | 927,248 | 2,477,026 | **2,665,439** | 2,515,891 |
+| deliveries/s, 4 client processes | 824,417 | 3,088,521 | **6,689,450** | 7,353,584 |
+| server CPU per round, 1 process | 4.75 s | 1.04–1.22 s | 0.12 s | ~0.09 s |
+| `io_uring_enter` per round | 1,478,997 | 45,595 | **3,558** | 49,765 `sendto` |
 
 Per change, each measured on its own with the pair API at one client process:
 
@@ -111,7 +111,9 @@ never had more than one was that the writer waited for each write to complete.
   published topic against every member's topic string on every delivery
   (1.6 M string compares per round), the tree compares segments once per
   publish and an integer per delivery. Round time 790 ms → 611 ms at one client
-  process, 458 ms → 254 ms at four.
+  process, 458 ms → 254 ms at four. The text is checked as UTF-8 once per
+  publish rather than once per member, and the topic of the last publish is
+  remembered so a repeated topic is one string compare rather than a walk.
 
 ### `lib/std/streamio.nim`
 

@@ -27,16 +27,16 @@ One round is 32 clients × 1600 messages each, every message fanned out to all
 
 | server | client procs | round | deliveries/s | server CPU |
 |---|---|---|---|---|
-| Bun `Bun.serve` | 1 × 32 | 631 ms | **2,541,884** | 0.50 s |
-| Bun `Bun.serve` | 4 × 8 | 225 ms | **7,291,716** | 0.45 s |
-| nimony, `Room` | 1 × 32 | 611 ms | **2,638,737** | 0.86 s |
-| nimony, `Room` | 2 × 16 | 370 ms | **4,380,096** | 0.69 s |
-| nimony, `Room` | 4 × 8 | 254 ms | **6,286,334** | 0.62 s |
-| nimony, writer per connection | 1 × 32 | 640 ms | **2,524,746** | 8.14 s |
-| nimony, writer per connection | 4 × 8 | 694 ms | **2,449,155** | 6.98 s |
+| Bun `Bun.serve` | 1 × 32 | 635 ms | **2,515,891** | 0.49 s |
+| Bun `Bun.serve` | 4 × 8 | 224 ms | **7,353,584** | 0.45 s |
+| nimony, `Room` | 1 × 32 | 608 ms | **2,665,439** | 0.77 s |
+| nimony, `Room` | 2 × 16 | 340 ms | **4,729,159** | 0.59 s |
+| nimony, `Room` | 4 × 8 | 241 ms | **6,689,450** | 0.59 s |
+| nimony, writer per connection | 1 × 32 | 644 ms | **2,477,026** | 6.10 s |
+| nimony, writer per connection | 4 × 8 | 525 ms | **3,088,521** | 5.22 s |
 
 The Bun 4×8 row is the noisiest (6.4–7.6 M across runs on this shared box);
-nimony's 4×8 row is 5.9–6.3 M.
+nimony's 4×8 row is 6.6–6.8 M.
 
 Per single message (one connection, 1600 round trips, no fan-out):
 nimony **32,228 msg/s** (~50 ms per 1600 round trips, ~31 µs each),
@@ -46,9 +46,9 @@ Reading the table:
 
 * **With one client process nimony is ahead** (2.64 M against 2.54 M): there the
   client is the bottleneck, and the room's turn costs less than Bun's loop.
-* **Bun is still ahead with four client processes** — 7.29 M against 6.29 M —
-  but by 16%, not by 3×. nimony's server CPU is *flat* at 0.6–0.9 s whatever
-  the split, against Bun's 0.45–0.50 s: a 1.4× difference, not a 15× one.
+* **Bun is still ahead with four client processes** — 7.35 M against 6.69 M —
+  but by 10%, not by 3×. nimony's server CPU is *flat* at 0.6–0.8 s whatever
+  the split, against Bun's 0.45–0.49 s: a 1.3× difference, not a 15× one.
 * The last two rows are the same room with a writer chain per connection,
   which is what the library's one-writer-per-connection rule forces an
   application into without a `Room`. Same throughput at one client process,
@@ -204,16 +204,16 @@ kept as `src/chatserver-conn.nim` for the comparison.
 
 | | writer per connection | `Room` (tree) |
 |---|---|---|
-| deliveries/s, 1 client process | 2,524,746 | **2,638,737** |
-| deliveries/s, 4 client processes | 2,449,155 | **6,286,334** |
-| server CPU per round | 1.40–1.63 s | **0.12–0.17 s** |
-| `io_uring_enter` per round | 45,595 | **3,296** |
+| deliveries/s, 1 client process | 2,477,026 | **2,665,439** |
+| deliveries/s, 4 client processes | 3,088,521 | **6,689,450** |
+| server CPU per round | 1.04–1.22 s | **0.12 s** |
+| `io_uring_enter` per round | 45,595 | **3,558** |
 
-The room is 2.6× faster than a writer chain per connection with four client
-processes, and 10× cheaper in CPU. Its 3,296 enters per round are **497
+The room is 2.2× faster than a writer chain per connection with four client
+processes, and 9× cheaper in CPU. Its 3,558 enters per round are **461
 deliveries per syscall**; Bun's `sendto` carries 33.
 
-What is left is the channel hop per message and the frame encode + copy: 0.62 s
+What is left is the channel hop per message and the frame encode + copy: 0.59 s
 of server CPU per 5 rounds against Bun's 0.45 s. It no longer limits throughput
 on this box.
 

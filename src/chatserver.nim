@@ -24,6 +24,15 @@ proc ignoreSigPipe() =
 
 const Topic = "room"
 
+# With -d:perSender every connection gets a topic of its own, so a publish has
+# exactly one subscriber: the same number of messages and channel sends as the
+# real room, 32× fewer frame deliveries. It is how the per-message cost is
+# measured apart from the per-delivery cost.
+when defined(perSender):
+  const OwnTopic = true
+else:
+  const OwnTopic = false
+
 var
   tags = newHttpTags()
   joined: int
@@ -42,7 +51,8 @@ proc announce() {.passive.} =
   ## clients stop waiting for their first message and start sending.
   sleep 100
   try:
-    defaultRoom().publish(Topic, "ready")
+    when defined(perSender): discard
+    else: defaultRoom().publish(Topic, "ready")
   except ErrorCode:
     discard
 
@@ -52,7 +62,8 @@ proc chat(c: sink HttpConnection) {.passive.} =
   var counted = false
   try:
     var ws = upgradeWebSocket(c)
-    ws.subscribe(Topic)
+    if OwnTopic: ws.subscribe(Topic & "/" & nm)
+    else: ws.subscribe(Topic)
     counted = true
     if atomicFetchAdd(joined, 1, moRelaxed) + 1 == clientsToWaitFor:
       submit(delay(announce()), -1)
@@ -61,7 +72,8 @@ proc chat(c: sink HttpConnection) {.passive.} =
       let kind = ws.recv(msg)
       case kind
       of mkText, mkBinary:
-        ws.publish(Topic, nm & ": " & msg)
+        if OwnTopic: ws.publish(Topic & "/" & nm, nm & ": " & msg)
+        else: ws.publish(Topic, nm & ": " & msg)
       of mkClose:
         break
       else:

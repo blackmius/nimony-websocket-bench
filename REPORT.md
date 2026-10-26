@@ -10,14 +10,14 @@ workload: 32 clients, every message echoed to all of them, one round =
 
 | | before | after | Bun 1.4.4 |
 |---|---|---|---|
-| deliveries/s, 1 client process | 927,248 | **2,638,737** | 2,541,884 |
-| deliveries/s, 4 client processes | 824,417 | **6,286,334** | 7,291,716 |
-| server CPU per round, 1 process | 4.75 s | **0.12–0.17 s** | ~0.09 s |
-| `io_uring_enter` per round | 1,478,997 | **3,296** | 49,765 `sendto` |
+| deliveries/s, 1 client process | 927,248 | **2,665,439** | 2,515,891 |
+| deliveries/s, 4 client processes | 824,417 | **6,689,450** | 7,353,584 |
+| server CPU per round, 1 process | 4.75 s | **0.12 s** | ~0.09 s |
+| `io_uring_enter` per round | 1,478,997 | **3,558** | 49,765 `sendto` |
 
-2.8× more throughput at one client process, 7.6× at four, 30× less CPU per
-round, and 449× fewer syscalls. With one client process nimony is now ahead of
-Bun (the client is the bottleneck there); with four it is at 86% of it, on 1.4×
+2.9× more throughput at one client process, 8.1× at four, 40× less CPU per
+round, and 416× fewer syscalls. With one client process nimony is ahead of Bun
+(the client is the bottleneck there); with four it is at 91% of it, on 1.3×
 Bun's server CPU instead of 15×.
 
 ## Where it came from, in order
@@ -31,7 +31,8 @@ Each step measured on its own, one client process:
 | `send(flush = false)` + a non-parking `tryRecv` drain | 2.38 M | 1.74 s |
 | the frame is spelled in place (`Writer.grow`), no allocation | 2.48 M | 1.40 s |
 | `Room`: one chain owns every writer, `publish` is one channel send | 2.09 M | 0.28 s |
-| topic tree instead of a member scan | **2.64 M** | **0.12–0.17 s** |
+| topic tree instead of a member scan | 2.64 M | 0.12–0.17 s |
+| topic cache + one UTF-8 check per publish (not per delivery) | **2.67 M** | **0.12 s** |
 
 Four things were wrong, and they compounded:
 
@@ -64,6 +65,10 @@ from 790 ms to 611 ms at one client process and from 458 ms to 254 ms at four.
   own write. Overlapping those waits needs "submit without waiting" plus "wait
   for the drain"; the deferred-submit variant alone measured *worse*
   (1.33 M, 1.06 M syscalls) because the wait is what creates the batch.
+* The per-message cost is ~2 µs and now dominates the server's CPU: one channel
+  send, one event construction and one frame append per member. Batching the
+  reader's lines into one event would cut the first two, and it needs a
+  non-parking check on the reader (`buffered`) to know a batch is there.
 * The channel hop per message: one ticket-lock round trip and a 24-byte copy.
 * `publish` walks the topic path with a `substr` per segment; caching the node
   in the subscription would do.
