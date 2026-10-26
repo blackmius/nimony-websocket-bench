@@ -1,1 +1,1 @@
-echo-bun-1x32          1 client proc(s)  round=  160.9 ms  aggregate=   313280 msg/s  server_cpu=  2.16s  alive=yes
+echo-bun-1x32          1 client proc(s)  round=  173.9 ms  aggregate=   289025 msg/s  server_cpu=  2.24s  alive=yes

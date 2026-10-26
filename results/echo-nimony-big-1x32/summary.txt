@@ -1,1 +1,1 @@
-echo-nimony-big-1x32   1 client proc(s)  round=  304.4 ms  aggregate=   164734 msg/s  server_cpu=  4.65s  alive=yes
+echo-nimony-big-1x32   1 client proc(s)  round=  323.1 ms  aggregate=   153774 msg/s  server_cpu=  4.58s  alive=yes

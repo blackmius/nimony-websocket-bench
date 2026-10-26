@@ -31,23 +31,20 @@ One round is 32 clients × 1600 messages each, every message fanned out to all
 
 | server | clients | round | deliveries/s | server CPU |
 |---|---|---|---|---|
-| Bun `Bun.serve` | 1 × 32 | 653 ms | 2,494,737 | 1.04 s |
-| nimony, `Room` | 1 × 32 | 664 ms | 2,431,989 | 1.83 s |
-| Bun `Bun.serve` | 4 × 8 | 215 ms | 7,612,020 | 1.03 s |
-| nimony, `Room` | 4 × 8 | 195 ms | **8,123,777** | 1.10 s |
+| Bun `Bun.serve` | 1 × 32 | 638 ms | 2,530,469 | 1.00 s |
+| nimony, `Room` | 1 × 32 | 664 ms | 2,471,337 | 1.79 s |
+| Bun `Bun.serve` | 4 × 8 | 215 ms | 7,670,167 | 1.06 s |
+| nimony, `Room` | 4 × 8 | 200 ms | **7,976,888** | 1.00 s |
 
 Reading the table:
 
-* **Level at one client process (−2.5%), ahead at four (+6.7%)**. The
-  one-process row is the one the last change in this round trades away (see the
-  trampoline in "What was changed"); before the work below it was 0.93 M
-  against 2.49 M.
-* **Bun uses 1.07–1.76× less CPU** (1.03 s against 1.10 s per 10 rounds at four
-  client processes, 1.04 against 1.83 at one). At four processes the two are
-  within 7% of each other on both throughput and CPU.
+* **Level at one client process (−2.3%), ahead at four (+4.0%)**. The
+  one-process row is the one the trampoline in "What was changed" trades away;
+  before the work below it was 0.93 M against 2.49 M.
+* **Bun uses 1.8× less CPU at one client process and 6% *more* at four** (1.00 s
+  against 1.79 s per 10 rounds at one, 1.06 against 1.00 at four).
 * An earlier run of this table read 2.54 M / 8.00 M for nimony and 2.54 M /
-  8.12 M for Bun: the box drifts, so the ratio is what is comparable, and the
-  ratio moved from +2.4%/+1.7% to −2.5%/+6.7% because of the trampoline below.
+  8.12 M for Bun: the box drifts, so the ratio is what is comparable.
 
 
 ## What was changed
@@ -166,7 +163,8 @@ A callgrind profile of that regime named two things:
   stops the moment the backend says a completion is already published
   (`gReactorHasReady`) so that nothing sits in the ring waiting for a worker
   that is busy unwinding a chain. 512 connections: **275k → 303k msg/s, CPU
-  1.62 → 1.44 cores** (medians of three alternating pairs).
+  1.62 → 1.44 cores** (medians of three alternating pairs); the pool below
+  took the same row to 320k.
 * **The slot arena keyed its per-fd lists by a `Table[cint, nil Slot]`**, one
   hash, one insert and one backshifting delete per op — `del` alone was 14.6%
   of instructions. A descriptor is already a small dense integer, so the heads
@@ -338,19 +336,20 @@ method as above.
 
 | | round | messages/s | server CPU per round | per message |
 |---|---|---|---|---|
-| Bun `Bun.serve` | 163 ms | 306,315 | 0.110 s | 2.15 µs |
-| nimony `std/websocket` | 163 ms | **308,639** | 0.121 s | 2.35 µs |
-| Bun `Bun.serve` | 47 ms | 1,090,936 | 0.039 s | 0.75 µs |
-| nimony `std/websocket` | 43 ms | **1,167,314** | 0.048 s | 0.91 µs |
-| Bun, 2000-byte messages | 366 ms | 138,229 | 0.195 s | 3.80 µs |
-| nimony, 2000-byte messages | 319 ms | **160,166** | 0.239 s | 4.66 µs |
+| Bun `Bun.serve` | 172 ms | 294,511 | 0.113 s | 2.20 µs |
+| nimony `std/websocket` | 163 ms | **307,849** | 0.122 s | 2.38 µs |
+| Bun `Bun.serve` | 48 ms | 1,096,155 | 0.040 s | 0.78 µs |
+| nimony `std/websocket` | 52 ms | 1,011,558 | 0.052 s | 1.01 µs |
+| Bun, 2000-byte messages | 347 ms | 144,004 | 0.185 s | 3.60 µs |
+| nimony, 2000-byte messages | 326 ms | **152,563** | 0.229 s | 4.47 µs |
 
 (upper rows: one client process, lower rows: four; the last two are 2000-byte
 messages, one client process)
 
-nimony is **level at one client process (+0.8%)**, ahead at four (+7.0%), and
-ahead on 2000-byte messages (+15.9%). It spends 1.1× Bun's CPU per message at
-one client process and 1.2× at four.
+nimony is **ahead at one client process (+4.5%)**, level at four on the longer
+run of that row (+5.5% over 5 interleaved pairs; it is the noisiest row on this
+box, ±8%), and ahead on 2000-byte messages (+5.9%). It spends 1.1× Bun's CPU
+per message at one client process and 1.3× at four.
 
 **The four-process row was 57% of Bun before one line changed: Nagle.** The
 library never set `TCP_NODELAY`, so the kernel held each small write until the
@@ -382,28 +381,28 @@ medians):
 
 | connections | server | rate | p50 | p99 | server CPU |
 |---|---|---|---|---|---|
-| 32 | Bun | 181,109 | 159 µs | 467 µs | 0.65 |
-| 32 | nimony | 135,185 | 209 µs | 597 µs | 0.92 |
-| 128 | Bun | 339,214 | 303 µs | 1,356 µs | 0.91 |
-| 128 | nimony | 261,291 | 415 µs | 1,725 µs | 1.52 |
-| 512 | Bun | 381,880 | 1,155 µs | 4,356 µs | 0.95 |
-| 512 | nimony | 310,369 | 985 µs | 6,767 µs | 1.44 |
-| 2048 | Bun | 309,344 | 6,338 µs | 12,757 µs | 0.95 |
-| 2048 | nimony | 240,852 | 7,310 µs | 22,115 µs | 1.42 |
+| 32 | Bun | 176,866 | 164 µs | 491 µs | 0.65 |
+| 32 | nimony | 139,962 | 205 µs | 568 µs | 0.92 |
+| 128 | Bun | 368,292 | 302 µs | 956 µs | 0.96 |
+| 128 | nimony | 277,612 | 393 µs | 1,484 µs | 1.53 |
+| 512 | Bun | 397,547 | 1,083 µs | 4,212 µs | 0.95 |
+| 512 | nimony | 319,694 | 922 µs | 6,576 µs | 1.47 |
+| 2048 | Bun | 309,966 | 6,261 µs | 14,592 µs | 0.95 |
+| 2048 | nimony | 236,440 | 7,553 µs | 22,793 µs | 1.44 |
 
 Reading it:
 
 * **Every connection is held**: 2048 of 2048 opened, zero errors, both servers.
   nimony's accept loop spawns a task per connection and keeps going.
-* **Rate is 75–81% of Bun's**, and the gap widens with concurrency. This is the
+* **Rate is 75–80% of Bun's**, and the gap widens with concurrency. This is the
   one benchmark where Bun's single event loop wins: one `epoll_wait` collects
   every ready socket and one `sendto` carries ~32 replies, while the ring does
   ~3 `io_uring_enter` per burst of ~19 messages.
-* **Median latency is comparable** — better at 512 connections (985 µs against
-  1,155 µs) — but the **tail is ~1.6× worse** (p99 6.8 ms against 4.4 ms at
+* **Median latency is comparable** — better at 512 connections (922 µs against
+  1,083 µs) — but the **tail is ~1.6× worse** (p99 6.6 ms against 4.2 ms at
   512). Three workers spread the median; the tail is a worker that was busy.
-* **CPU is 1.4–1.7× Bun's.** At 128 connections nimony spends 1.52 cores to
-  Bun's 0.91, and on a 4-core box shared with four client processes that is
+* **CPU is 1.5–1.7× Bun's.** At 128 connections nimony spends 1.53 cores to
+  Bun's 0.96, and on a 4-core box shared with four client processes that is
   paid for by the clients.
 
 **Mode `paced`: 512 connections at a fixed offered rate** (one message per
@@ -411,13 +410,13 @@ connection per interval, so the server's capacity is never the limit):
 
 | offered rate | server | rate | p50 | p99 | server CPU |
 |---|---|---|---|---|---|
-| 5,120 msg/s | Bun | 5,063 | 3,843 µs | 13,009 µs | 0.08 |
-| 5,120 msg/s | nimony | **5,069** | **3,160 µs** | **9,994 µs** | 0.16 |
-| 51,200 msg/s | Bun | 46,435 | 1,038 µs | 5,390 µs | 0.32 |
-| 51,200 msg/s | nimony | **48,953** | **816 µs** | **4,042 µs** | 0.51 |
+| 5,120 msg/s | Bun | 5,050 | 3,690 µs | 13,467 µs | 0.07 |
+| 5,120 msg/s | nimony | **5,069** | **2,275 µs** | **10,528 µs** | 0.13 |
+| 51,200 msg/s | Bun | 46,929 | 861 µs | 5,461 µs | 0.30 |
+| 51,200 msg/s | nimony | **48,639** | **834 µs** | **3,763 µs** | 0.49 |
 
 At a fixed load nimony delivers **more**, at a **lower median and a lower 99th
-percentile** (4.0 ms against 5.4 ms), and it costs 1.6× the CPU
+percentile** (3.8 ms against 5.5 ms), and it costs 1.6× the CPU
 of a single-threaded server that is one thread away from its ceiling. That is
 the trade the thread pool makes: more CPU, three cores of headroom.
 
@@ -436,13 +435,14 @@ matter what the server can do.
 | server | held | server RSS | per connection | idle CPU |
 |---|---|---|---|---|
 | Bun `Bun.serve` | 8192 / 8192 | +14 MB | **1.7 KB** | 0.04 cores |
-| nimony, before this round | 8192 / 8192 | +98 MB | 12.0 KB | 0.05 cores |
-| nimony, after | 8192 / 8192 | +72 MB | **9.0 KB** | 0.06 cores |
+| nimony, before this MR | 8192 / 8192 | +98 MB | 12.0 KB | 0.05 cores |
+| nimony, before the pool | 8192 / 8192 | +72 MB | 9.0 KB | 0.06 cores |
+| nimony, after | 8192 / 8192 | +40 MB | **5.0 KB** | 0.06 cores |
 
 (Idle CPU is flat in the connection count: it is the pool's periodic wakeup,
 ~0.05 cores, not a per-connection cost.)
 
-Four things were holding the number down, all of them found by counting the
+Five things were holding the number down, all of them found by counting the
 allocator's live blocks per size class (`-d:allocStats`) rather than by
 guessing:
 
@@ -451,7 +451,7 @@ guessing:
    `Encoder` is a field of `HttpConnection`. So every connection carried the
    compressor's working set for a feature that is off by default.
    `sizeof(HttpConnection)` was **3320 bytes**; with the histograms on the heap
-   it is **824**. The arrays are still allocated once per *compressing* stream,
+   it is **848**. The arrays are still allocated once per *compressing* stream,
    which is the only place they were ever used.
 2. **A 16 KB read buffer per connection.** `readFd` reserved `ChunkSize` of
    spare room before every read, and the reservation is what the buffer keeps —
@@ -471,16 +471,40 @@ guessing:
    511). This one is not memory at all, but it is the difference between
    "accepts 8192 connections" and "accepts 6630 of them".
 
-What is left is ~9 KB for an upgraded, idle connection against 4.6 KB for one
-that only accepts and parks, so roughly half is the WebSocket object, the
-parked echo chain and the writer's outbox. The next steps, in order: reuse the
-per-connection objects from a per-lane pool (they are all freed on close, and a
-connection is accepted and closed in the same lane), shrink the frames (the
-echo frame holds a whole `WebSocket` by value), and the allocator's page
+5. **The buffer a connection reserves before it reads** — and this one is not a
+   bug but a design: `readFd` had to reserve room *before* the read, because the
+   kernel needs somewhere to put the bytes, and the reservation is what the
+   connection keeps. 2080 bytes of a 5888-byte connection, held for as long as
+   the peer is quiet.
+
+   The fix is a provided-buffer ring per io_uring lane: a read is submitted with
+   `IOSQE_BUFFER_SELECT`, the kernel takes a buffer from the ring **when there
+   is something to put in it**, and the completion names the buffer it filled.
+   A parked read therefore holds nothing, and a record that arrives whole is
+   parsed straight out of the pool buffer — the reader copies it once into the
+   caller's `msg`, exactly as before, and allocates no buffer of its own. What
+   is left of a connection's own buffer is the case where a record spans reads:
+   it is allocated for that record and released when it is consumed, which is
+   the "dynamic shrink" the connection's buffer wanted. A peer that keeps
+   filling a pool buffer grows the reader's `step` past it and the connection
+   reads into a buffer of its own, where the big reads belong.
+
+   `Reader` grew a 16-byte `Chunk` and `peek`/`consume`/`buffered` learned to
+   hand out bytes that belong to the pool; nothing above `Reader` changed. The
+   pool is 256 × 4 KB per lane, `mmap`'d, and filled on the first pooled read,
+   so a program that never borrows pays nothing.
+
+What is left is ~5 KB for an upgraded, idle connection: 1152 bytes of parked
+echo chain (848 of them the `HttpConnection`), ~1.5 KB of continuation frames
+(the 25 small blocks a parked chain of nested `.passive` calls is made of) and
+~1.1 KB of `WebSocket` state and writer outbox. The next steps, in order: reuse
+the per-connection objects from a per-lane pool (they are all freed on close,
+and a connection is accepted and closed in the same lane), shrink the frames
+(the echo frame holds a whole `WebSocket` by value), and the allocator's page
 granularity — a 2 KB chunk still touches a 4 KB page.
 
 **A million connections is not testable on this machine**, and the arithmetic
-says why: at 9.0 KB each it would need ~9 GB of server memory (Bun: ~1.7 GB),
+says why: at 4.6 KB each it would need ~4.6 GB of server memory (Bun: ~1.7 GB),
 and the box has 1.7 GB free. It also needs ~1M ephemeral ports, and the
 loopback range here is 28,231 — which is exactly where the sweep stops: 32,768
 asked, **28,228 held, both servers, the same number**, because the client ran

@@ -9,21 +9,21 @@ shared and drifts by ~10%, so Bun and nimony are measured alternately and the
 medians of 3 repetitions are reported. A 3% difference is not a result.
 
 The same work also made the many-connection case viable: 512 connections
-ping-ponging went from 275k to 303k msg/s, and the memory a held connection
-costs came down from 12.0 KB to 9.0 KB — see "Holding connections" below.
+ping-ponging went from 275k to 320k msg/s, and the memory a held connection
+costs came down from 12.0 KB to **5.0 KB** — see "Holding connections" below.
 
 ## Headline
 
 | | before | after | Bun 1.4.4 |
 |---|---|---|---|
-| deliveries/s, 1 client process | 927,248 | **2,431,989** | 2,494,737 |
-| deliveries/s, 4 client processes | 824,417 | **8,123,777** | 7,612,020 |
-| server CPU per round, 1 process | 4.75 s | 0.183 s | 0.104 s |
+| deliveries/s, 1 client process | 927,248 | **2,471,337** | 2,530,469 |
+| deliveries/s, 4 client processes | 824,417 | **7,976,888** | 7,670,167 |
+| server CPU per round, 1 process | 4.75 s | 0.179 s | 0.100 s |
 | `io_uring_enter` per round | 1,478,997 | **3,558** | 49,765 `sendto` |
 
-2.6× more throughput at one client process and 9.9× at four, level at one
-client process (−2.5%) and ahead at four (+6.7%), on ~1.1–1.8× Bun's server CPU
-instead of 15×.
+2.7× more throughput at one client process and 9.7× at four, level at one
+client process (−2.3%) and ahead at four (+4.0%), on ~1.8× Bun's server CPU at
+one client process and *less* than Bun's at four, instead of 15×.
 
 The runtime underneath was part of the work: the ring's op queue and the pool's
 task queue both took a `SysLock` per operation. They are now a same-thread ring
@@ -78,13 +78,14 @@ per round.
 
 | | 1 client process | 4 client processes | server CPU per message |
 |---|---|---|---|
-| Bun | 306,315 msg/s | 1,090,936 msg/s | 0.80 µs |
-| nimony | **308,639 msg/s** | **1,167,314 msg/s** | 1.10 µs |
+| Bun | 294,511 msg/s | 1,096,155 msg/s | 0.80 µs |
+| nimony | **307,849 msg/s** | **1,011,558 msg/s** | 1.10 µs |
 
-Level at one client process (+0.8%), ahead at four (+7.0%), on 1.1–1.2× Bun's
-CPU per message (it was 2.6×). With 2000-byte messages (per-message cost spread
-over 133× more bytes) nimony is ahead too: 160,166 against 138,229 msg/s
-(+15.9%).
+Level at one client process (+4.5%), level at four on the medians of the longer
+run of that row (+5.5% over 5 interleaved pairs; the 4×8 echo is the noisiest
+row on this box, ±8%), on 1.1–1.3× Bun's CPU per message (it was 2.6×). With
+2000-byte messages (per-message cost spread over 133× more bytes) nimony is
+ahead too: 152,563 against 144,004 msg/s (+5.9%).
 
 **The four-process row was 57% of Bun until `TCP_NODELAY` was set on accept.**
 The kernel was holding each small write until the previous one was
@@ -107,20 +108,30 @@ still costs the *one*-client-process echo ~6%, which is client-bound.
 | server | server RSS per connection | idle CPU |
 |---|---|---|
 | Bun `Bun.serve` | **1.7 KB** | 0.04 cores |
-| nimony, before | 12.0 KB | 0.05 cores |
-| nimony, after | **9.0 KB** | 0.06 cores |
+| nimony, before this MR | 12.0 KB | 0.05 cores |
+| nimony, before the pool | 9.0 KB | 0.06 cores |
+| nimony, after | **5.0 KB** | 0.06 cores |
 
-Four causes, found by counting the allocator's live blocks per size class:
-a 2.5 KB DEFLATE histogram inline in every `HttpConnection` (3320 → 824 bytes
-once the histograms moved to the heap); a 16 KB read buffer reserved per
-connection and rounded to a 36 KB chunk by the allocator (now 1 KB, doubling to
-16 KB only while a peer fills it); the same eager 8 KB + 8 KB buffers in
-`std/socket`; and a listen backlog default of 128, which lost 19% of an
-8192-connection storm to dropped SYNs.
+Five causes, found by counting the allocator's live blocks per size class:
 
-A million connections would need ~9 GB of server memory (Bun: 1.7 GB); this box
-has 1.7 GB free, and its loopback port range (28,231 ports) stops the sweep at
-28,228 connections held — the same number for both servers.
+* a 2.5 KB DEFLATE histogram inline in every `HttpConnection` (3320 → 848 bytes
+  once the histograms moved to the heap);
+* a 16 KB read buffer reserved per connection and rounded to a 36 KB chunk by
+  the allocator (1 KB now, doubling to 16 KB only while a peer fills it);
+* the same eager 8 KB + 8 KB buffers in `std/socket`;
+* a listen backlog default of 128, which lost 19% of an 8192-connection storm to
+  dropped SYNs;
+* and then, the largest single piece: **the buffer a connection reserves before
+  it reads**. A provided-buffer ring per lane (`IOSQE_BUFFER_SELECT`) means the
+  kernel takes a buffer *when there is something to put in it*, so a parked
+  connection holds none, and a record that arrives whole is parsed out of the
+  pool buffer. What is left of a connection's own buffer is the case where a
+  record spans reads.
+
+A million connections would need ~4.6 GB of server memory (Bun: 1.7 GB); this
+box has 1.7 GB free, and its loopback port range (28,231 ports) stops the sweep
+at 28,228 connections held — the same number for both servers, and now in
+126 MB instead of 260.
 
 ## Many connections
 
@@ -129,18 +140,18 @@ medians of 2 runs, 4 client processes.
 
 | connections | Bun rate | nimony rate | ratio | Bun p99 | nimony p99 |
 |---|---|---|---|---|---|
-| 32 | 181,109 | 135,185 | 75% | 467 µs | 597 µs |
-| 128 | 339,214 | 261,291 | 77% | 1,356 µs | 1,725 µs |
-| 512 | 381,880 | 310,369 | 81% | 4,356 µs | 6,767 µs |
-| 2048 | 309,344 | 240,852 | 78% | 12,757 µs | 22,115 µs |
+| 32 | 176,866 | 139,962 | 79% | 491 µs | 568 µs |
+| 128 | 368,292 | 277,612 | 75% | 956 µs | 1,484 µs |
+| 512 | 397,547 | 319,694 | 80% | 4,212 µs | 6,576 µs |
+| 2048 | 309,966 | 236,440 | 76% | 14,592 µs | 22,793 µs |
 
 Every connection is held (2048/2048, no errors) by both. nimony's median
-latency is better at 512 connections (985 µs against 1,155 µs), its tail is
-~1.6× worse, and it spends 1.4–1.7× Bun's CPU (was 1.6–1.9×). At a *fixed*
-offered rate nimony delivers more, at a lower median and a lower tail (816 µs /
-4.0 ms against 1,038 µs / 5.4 ms at 51,200 msg/s offered) — that is the thread
-pool's trade: 1.6× the CPU of a single-threaded server that is one thread away
-from its ceiling.
+latency is better at 512 connections (922 µs against 1,083 µs), its tail is
+~1.6× worse, and it spends 1.5–1.7× Bun's CPU. At a *fixed* offered rate nimony
+delivers more, at a lower median and a lower tail (834 µs / 3.8 ms against
+861 µs / 5.5 ms at 51,200 msg/s offered) — that is the thread pool's trade:
+1.6× the CPU of a single-threaded server that is one thread away from its
+ceiling.
 
 What is left of Bun's advantage in the `max` rows is syscall batching: one
 `epoll_wait` collects every ready socket, one `sendto` carries ~32 replies, while
@@ -148,11 +159,15 @@ the ring does ~3 `io_uring_enter` per burst of ~19 messages.
 
 ## What is left
 
-* The other half of the 9 KB per connection: a connection that only accepts and
-  parks costs 4.6 KB, so the `WebSocket` object, the parked echo chain and the
-  writer's outbox are the rest. Reusing the per-connection objects from a
+* What is left of the 5 KB per connection: 1152 bytes of parked echo chain (848
+  of them the `HttpConnection`), ~1.5 KB of continuation frames and ~1.1 KB of
+  `WebSocket` state and writer outbox. Reusing the per-connection objects from a
   per-lane pool, shrinking the frames (the echo frame holds a `WebSocket` by
   value), and the allocator's page granularity are the next three.
+* A pooled read costs ~4% on the 2000-byte echo (fewer, bigger reads, 4% less
+  CPU, a longer round). It is not the buffer size and not the copy count;
+  `-d:noPoolRead` switches the pool off for anyone who would rather have the
+  4%.
 * The p99 in the `max` rows: a worker cannot poll its own lane while it runs a
   continuation, so a long chain delays every completion on that lane.
 * A turn flushes its members one after another, and each flush waits for its

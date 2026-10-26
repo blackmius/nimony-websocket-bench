@@ -5,7 +5,7 @@
 # The same client drives it (`src/bench-client.mjs` with READY=0 and
 # TOTAL_CLIENTS=1, so it counts its own echoes).
 
-import std / [httpserver, websocket, socket, ioring, threadpool, syncio, os,
+import std / [httpserver, websocket, socket, ioring, threadpool, syncio, os, streamio,
               envvars, strutils]
 
 {.feature: "assumeSync".}  # `tags` is read by every handler and never written
@@ -78,6 +78,9 @@ proc main =
   while true:
     sleep 1000
     inc elapsed
+    when defined(poolStats):
+      stderr.write "  pool: tries " & $gTries & " ok " & $gOk & " nobuf " & $gNoBuf &
+                   " owned " & $gOwned & "\n"
     when defined(allocStats):
       for i in 0 ..< 128:
         if gStatCount[i] > 0:

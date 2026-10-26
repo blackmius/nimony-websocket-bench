@@ -42,7 +42,7 @@ proc envInt(key: string; fallback: int): int =
     result = fallback
 
 proc main =
-               " Reader " & $sizeof(Reader) & " Writer " & $sizeof(Writer) & "\n"
+  stdout.write " Reader " & $sizeof(Reader) & " Writer " & $sizeof(Writer) & "\n"
   initIoRing()
   submit(delay(serve(uint16(envInt("PORT", 4001)))), 0)
   let exitAfter = envInt("EXIT_AFTER_S", 0)

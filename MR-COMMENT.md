@@ -16,62 +16,79 @@ publishes and 1,638,400 frame deliveries.
 
 | | nimony | Bun | delta |
 |---|---|---|---|
-| deliveries/s, 1 client process | 2,431,989 (664 ms) | 2,494,737 (653 ms) | −2.5% |
-| deliveries/s, 4 client processes | 8,123,777 (195 ms) | 7,612,020 (215 ms) | **+6.7%** |
-| server CPU per round, 1 process | 0.183 s | 0.104 s | 1.76× |
-| server CPU per round, 4 processes | 0.110 s | 0.103 s | 1.07× |
+| deliveries/s, 1 client process | 2,471,337 (664 ms) | 2,530,469 (638 ms) | −2.3% |
+| deliveries/s, 4 client processes | 7,976,888 (200 ms) | 7,670,167 (215 ms) | **+4.0%** |
+| server CPU per round, 1 process | 0.179 s | 0.100 s | 1.79× |
+| server CPU per round, 4 processes | 0.100 s | 0.106 s | 0.94× |
 
 Plain echo: 51,200 messages and 51,200 deliveries per round, no fan-out.
 
 | | nimony | Bun | delta |
 |---|---|---|---|
-| messages/s, 1 client process | 308,639 (163 ms) | 306,315 (163 ms) | +0.8% |
-| messages/s, 4 client processes | 1,167,314 (43 ms) | 1,090,936 (47 ms) | **+7.0%** |
-| messages/s, 2000-byte messages | 160,166 (319 ms) | 138,229 (366 ms) | **+15.9%** |
+| messages/s, 1 client process | 307,849 (163 ms) | 294,511 (172 ms) | **+4.5%** |
+| messages/s, 4 client processes | 1,011,558 (52 ms) | 1,096,155 (48 ms) | −7.7% |
+| messages/s, 2000-byte messages | 152,563 (326 ms) | 144,004 (347 ms) | **+5.9%** |
 
-So four of the five rows are ahead or level, on 1.07–1.76× Bun's CPU. The one
-that is behind is the chat at one client process, and it is behind *because* of
-the change that put the other four ahead — see the trampoline below: that row
-is client-bound, so it measures latency, and a worker that keeps unwinding a
-chain delays the poll that has ~19 completions waiting.
+The echo at four client processes is the noisiest row on this box: over 5
+interleaved pairs taken on their own it reads 1,077,431 against Bun's 1,021,132
+(**+5.5%**), and every run of the day has put it between −8% and +15% while Bun
+stays within ±5%. The chat at one client process is behind *because* of the
+change that put the other rows ahead — see the trampoline below: that row is
+client-bound, so it measures latency, and a worker that keeps unwinding a chain
+delays the poll that has ~19 completions waiting.
 
-## This round: the many-connection regime
+## This round: the read buffer
 
-Everything above was measured on the flood workload, where one poll carries ~19
-messages. The shape a server is actually bought for is the opposite: thousands
-of connections, one message in flight each, so one completion per poll. The
-same code cost **5.7 µs of CPU per message there against 1.1 µs in the flood**,
-and a callgrind profile of that regime named two things.
+The previous round brought a held connection from 12.0 KB to 9.0 KB, and the
+largest single piece left was the buffer a connection reserves *before* it
+reads, so the kernel has somewhere to put the bytes: **2080 bytes of a 5888-byte
+connection**. A connection waiting for its peer has nothing to receive, and it
+held that buffer anyway, for as long as it was quiet.
 
-* **`submit` was 24% of the instructions — 16 calls per message.** Every step of
-  a `.passive` chain (an echo is eight frames deep) was pushed to the
-  work-stealing deque and popped again: two atomics, a division and a call per
-  frame. `drainOnce` now runs a chain's next steps inline (`trampolineSteps`,
-  64) and **stops as soon as the backend reports a completion already published
-  and not yet consumed** (`gReactorHasReady` → one atomic load of the ring's
-  shared tail). That gate is the whole difference from the attempt that was
-  rejected in an earlier round: without it the worker keeps unwinding while
-  completions sit in the ring, which is pure latency.
-* **The slot arena keyed its per-fd lists by a `Table[cint, nil Slot]`** — one
-  hash, one insert and one backshifting delete *per operation*; `del` alone was
-  14.6% of the instructions. A descriptor is a small dense integer, so the heads
-  are a `seq[nil Slot]` indexed by `fd + 1` (the `+1` for `opTimeout`/`opNop`,
-  which have no descriptor: `fd = -1`, which a table accepted and an array does
-  not).
+A provided-buffer ring turns that around. Each io_uring lane registers a ring of
+buffers; a read is submitted with `IOSQE_BUFFER_SELECT`, the kernel takes a
+buffer **when there is something to put in it**, and the completion names the
+buffer it filled. A parked read therefore holds nothing, and a record that
+arrives whole is parsed straight out of the pool buffer — the reader copies it
+once into the caller's `msg`, exactly as before, and allocates no buffer of its
+own.
 
-Medians of three alternating pairs, before → after this round:
+* a record that does not fit in one pool buffer is continued in the reader's own
+  buffer: the only case where a connection pays for one, released as soon as the
+  record is consumed;
+* a peer that keeps filling a pool buffer grows the reader's `step` past it and
+  the connection reads into a buffer of its own, where the big reads belong;
+* `Reader` grew a 16-byte `Chunk` and `peek`/`consume`/`buffered` learned to hand
+  out bytes that belong to the pool. Nothing above `Reader` changed.
 
-| | before | after | |
-|---|---|---|---|
-| 512 connections, ping-pong | 275k msg/s | **303k** | **+10%**, CPU 1.62 → 1.44 |
-| echo, 4 client processes | 993k | **1.12M** | **+13%** |
-| chat, 4 client processes | 6.83M | 7.08M | +3.7% |
-| chat, 1 client process | 2.27M | 2.24M | −1.5% (inside its spread) |
-| echo, 1 client process | 314k | 294k | **−6%** |
+| | before this round | after |
+|---|---|---|
+| 8192 connections held, RSS per connection | 9.0 KB | **5.0 KB** |
+| 28,228 connections held (the port limit) | 260 MB | **126 MB** |
+| `sizeof(HttpConnection)` | 824 B | 848 B |
+| read buffer per parked connection | 2080 B | **0** |
 
-Two other ideas were measured and rejected in that regime: spinning in the poll
-loop instead of blocking (rate and CPU identical — the wakeup was never the
-cost) and submitting the write without parking on it (neutral).
+Found in the same measurement and not about connections at all: a string that
+becomes long doubled its *first* heap block (`transitionToLong` used the
+geometric-growth helper on a string that had nothing to grow from). A 1 KB
+reservation cost 2 KB, a 16 KB read buffer 36 KB — on every string in the
+program that ever became long. It is now the size that was asked for;
+`allocatedSize` of a 1 KB reservation went 2080 → 1056.
+
+The honest cost: a pooled read is ~4% slower on the 2000-byte echo, at 4% *less*
+CPU — a longer round with less work in it, so it is per read and not per byte.
+It is not the buffer size (16 KB pool buffers are no better there and 6% worse
+on 40-byte messages) and not the copy count. `-d:noPoolRead` turns the pool off
+for anyone who would rather have the 4%.
+
+`IORING_OP_RECV_MULTISHOT` is the obvious companion and is deliberately not in
+this change: a multishot request is armed on one ring and its completions land
+on the lane that owns it for as long as it stays armed, while a chain here can
+be stolen by another worker between two reads. A second recv armed from the new
+lane would race the first for the same stream, and two concurrent `recv`s on one
+socket deliver bytes in whatever order the kernel picked. It needs a connection
+pinned to a lane for its whole life — a change to the pool's load balancing, and
+it would buy the SQE fill per read, which is the smaller half.
 
 ## What a connection costs
 
@@ -81,39 +98,17 @@ was measured directly: 8192 connections, one echo each, then held idle.
 | server | held | server RSS per connection | idle CPU |
 |---|---|---|---|
 | Bun `Bun.serve` | 8192 / 8192 | **1.7 KB** | 0.04 cores |
-| nimony, before this round | 8192 / 8192 | 12.0 KB | 0.05 cores |
-| nimony, after | 8192 / 8192 | **9.0 KB** | 0.06 cores |
+| nimony, before this MR | 8192 / 8192 | 12.0 KB | 0.05 cores |
+| nimony, before this round | 8192 / 8192 | 9.0 KB | 0.06 cores |
+| nimony, after | 8192 / 8192 | **5.0 KB** | 0.06 cores |
 
-Four separate causes, found by counting the allocator's live blocks per size
-class (`-d:allocStats`) rather than by guessing:
-
-1. **A 2.5 KB DEFLATE histogram in every connection.** `Deflater` kept its
-   symbol frequencies inline (`array[286, int]` + `array[30, int]`) and
-   `Encoder` is a field of `HttpConnection`, so every connection carried the
-   compressor's working set for a feature that is off by default.
-   `sizeof(HttpConnection)` was **3320 bytes**; the histograms are on the heap
-   now, allocated once per compressing stream, and it is **824**.
-2. **A 16 KB read buffer per connection.** `readFd` reserved `ChunkSize` of
-   spare room before every read and the reservation is what the buffer keeps —
-   8000 quiet clients held 8000 sixteen-kilobyte buffers to receive forty bytes,
-   and the allocator rounded each to **36 KB**. The step now starts at 1 KB and
-   doubles only while a read comes back full (up to 16 KB), so a quiet
-   connection holds 1 KB and a flooding one is at 16 KB reads within five reads.
-3. **The same disease in `std/socket`**: `initSocket` allocated an 8 KB read and
-   an 8 KB write buffer eagerly. Both are lazy now — that is what took the
-   *driver* from 30 KB to 14 KB per connection, and without it the sweep cannot
-   go past a few thousand.
-4. **A listen backlog of 128.** `listenHttp`'s default, so a client opening 8192
-   connections at once overflowed it and **19% were lost to dropped SYNs** — a
-   server that looks like it cannot accept a storm. At 4096 the same run lost
-   none; the default is 1024 now (nginx and Node use 511).
-
-What is left: a connection that only accepts and parks costs 4.6 KB, so about
-half of the upgraded idle connection is the `WebSocket` object, the parked echo
-chain and the writer's outbox.
+What is left, per connection: 1152 bytes of parked echo chain (848 of them the
+`HttpConnection`), ~1.5 KB of continuation frames (25 small blocks: the frames
+of the nested `.passive` calls an echo parks in), and ~1.1 KB of `WebSocket`
+state and writer outbox.
 
 **A million connections is not testable here**, and the arithmetic says why: at
-9.0 KB each it needs ~9 GB of server memory (Bun: ~1.7 GB) and the box has
+4.6 KB each it needs ~4.6 GB of server memory (Bun: ~1.7 GB) and the box has
 1.7 GB free. It also needs ~1M ephemeral ports, and the loopback range is
 28,231 — which is exactly where the sweep stops: 32,768 asked, **28,228 held,
 both servers, the same number**, because the driver ran out of ports before
@@ -127,26 +122,26 @@ back to back, so the row is "this many clients, at this rate, with this RTT"
 
 | connections | Bun rate | nimony rate | ratio | Bun p50 | nimony p50 | Bun p99 | nimony p99 |
 |---|---|---|---|---|---|---|---|
-| 32 | 181,109 | 135,185 | 75% | 159 µs | 209 µs | 467 µs | 597 µs |
-| 128 | 339,214 | 261,291 | 77% | 303 µs | 415 µs | 1,356 µs | 1,725 µs |
-| 512 | 381,880 | 310,369 | 81% | 1,155 µs | **985 µs** | 4,356 µs | 6,767 µs |
-| 2048 | 309,344 | 240,852 | 78% | 6,338 µs | 7,310 µs | 12,757 µs | 22,115 µs |
+| 32 | 176,866 | 139,962 | 79% | 164 µs | 205 µs | 491 µs | 568 µs |
+| 128 | 368,292 | 277,612 | 75% | 302 µs | 393 µs | 956 µs | 1,484 µs |
+| 512 | 397,547 | 319,694 | 80% | 1,083 µs | **922 µs** | 4,212 µs | 6,576 µs |
+| 2048 | 309,966 | 236,440 | 76% | 6,261 µs | 7,553 µs | 14,592 µs | 22,793 µs |
 
 Every connection is held by both (2048/2048, zero errors). nimony's median RTT
-is better at 512 connections, its tail is ~1.6× worse, and it spends 1.4–1.7×
-the CPU (was 1.6–1.9×).
+is better at 512 connections, its tail is ~1.6× worse, and it spends 1.5–1.7×
+the CPU.
 
 At a **fixed** offered rate, with the server's capacity never the limit
 (512 connections, one message each per interval):
 
 | offered | server | delivered | p50 | p99 | CPU |
 |---|---|---|---|---|---|
-| 5,120 msg/s | Bun | 5,063 | 3,843 µs | 13,009 µs | 0.08 |
-| 5,120 msg/s | nimony | **5,069** | **3,160 µs** | **9,994 µs** | 0.16 |
-| 51,200 msg/s | Bun | 46,435 | 1,038 µs | 5,390 µs | 0.32 |
-| 51,200 msg/s | nimony | **48,953** | **816 µs** | **4,042 µs** | 0.51 |
+| 5,120 msg/s | Bun | 5,050 | 3,690 µs | 13,467 µs | 0.07 |
+| 5,120 msg/s | nimony | **5,069** | **2,275 µs** | **10,528 µs** | 0.13 |
+| 51,200 msg/s | Bun | 46,929 | 861 µs | 5,461 µs | 0.30 |
+| 51,200 msg/s | nimony | **48,639** | **834 µs** | **3,763 µs** | 0.49 |
 
-That is the trade the thread pool makes, and at a fixed load it now wins on
+That is the trade the thread pool makes, and at a fixed load it wins on
 delivery, median and tail at 1.6× the CPU of a single-threaded server that is
 one thread away from its ceiling.
 
@@ -154,12 +149,15 @@ one thread away from its ceiling.
 
 * **The tail** in the `max` rows. A worker cannot poll its own lane while it
   runs a continuation, so a long chain delays every completion on that lane.
-  That is also why the trampoline needs the gate, and why a larger
-  `trampolineSteps` is not automatically better.
-* **The other half of the 9 KB.** Reuse the per-connection objects from a
-  per-lane pool (they are allocated and freed in the same lane), shrink the
-  frames (the echo frame holds a whole `WebSocket` by value), and the
-  allocator's page granularity — a 2 KB chunk still touches a 4 KB page.
+  That is also why the trampoline needs the `gReactorHasReady` gate, and why a
+  larger `trampolineSteps` is not automatically better.
+* **The other 5 KB.** Reuse the per-connection objects from a per-lane pool
+  (they are allocated and freed in the same lane), shrink the frames (the echo
+  frame holds a whole `WebSocket` by value), and the allocator's page
+  granularity — a 2 KB chunk still touches a 4 KB page.
+* **The 4% a pooled read costs** on the 2000-byte echo: somewhere between the
+  SQE's buffer selection and the completion that names the buffer. Worth a look
+  from someone with kernel tracing; the pool is a define away from being off.
 * **Allocation** is still ~13% of the echo's CPU (~6 coroutine frames per
   message, one per nested `.passive` call). A per-thread frame cache was tried
   and measured *worse* — chains migrate between workers, so freed frames pile

@@ -1,1 +1,1 @@
-{"conns":512,"mode":"max","opened":512,"errors":0,"sent":417491,"recv":416979,"seconds":8.06,"rate":51764,"samples":416979,"p50us":9010.3,"p90us":15646.7,"p99us":22772.3,"maxus":69041.2}
+{"conns":512,"mode":"max","opened":512,"errors":0,"sent":462280,"recv":461768,"seconds":8.05,"rate":57378,"samples":461768,"p50us":7839.9,"p90us":15245.5,"p99us":23572.1,"maxus":95661.3}
