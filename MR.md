@@ -1,37 +1,41 @@
-# std/websocket: a `Room` for fan-out, one flush per frame, no per-frame allocation
+# std/websocket: a `Room` for fan-out, one flush per frame, and a runtime that holds 8k connections
 
 ## Summary
 
 A chat-room server written on `std/websocket` — the workload of Bun's
 [`bench/websocket-server`](https://github.com/oven-sh/bun/tree/main/bench/websocket-server)
-— moved **927k → 2.54M** fan-out messages/s on a 4-core aarch64 box, and
-**824k → 8.00M** with four client processes. Server CPU per round went from
-4.75 s to 0.195 s; `io_uring_enter` calls per round from 1,478,997 to 3,558.
-Bun's own server, same client, same machine, measured interleaved: 2.54M and
-8.12M, at 0.101 s and 0.089 s per round.
+— is now **at parity or ahead of Bun on every row but one**, on a 4-core
+aarch64 box, measured interleaved against Bun on the same machine:
 
-The write path and the fan-out are most of that, but not all of it: the runtime
-underneath took a `SysLock` per queued task and per submitted I/O op, and the
-scheduler was **52% of the echo server's CPU**. Both queues are lock-free now
-(a same-thread ring for a lane's ops, Chase-Lev work-stealing deques for
-tasks), which is −42% instructions per echoed message.
+| | nimony | Bun 1.4.4 | |
+|---|---|---|---|
+| chat, 1 client process | 2,431,989 deliveries/s | 2,494,737 | −2.5% |
+| chat, 4 client processes | **8,123,777** | 7,612,020 | +6.7% |
+| plain echo, 1 client process | **308,639** msg/s | 306,315 | +0.8% |
+| plain echo, 4 client processes | **1,167,314** msg/s | 1,090,936 | +7.0% |
+| plain echo, 2000-byte messages | **160,166** msg/s | 138,229 | +15.9% |
 
-Four things were in the way, all in the write path:
+The write path and the fan-out are most of the way there, but not all of it.
+Three separate things were in the way:
 
-1. `sendFrame` wrote the frame header and the payload with **two**
-   `write` + `flush` pairs. A flush is a syscall and, on a ring, a
-   submit-and-wait, so a two-byte header cost as much as the payload.
-2. Every frame cost **two heap allocations**: one for the header string, one
-   for a client's masked copy of the payload.
-3. There was no way to write a **run** of frames with one syscall, which is
-   what a fan-out needs: one published message becomes 32 frames, each paying a
-   syscall of its own.
-4. There was no **publish/subscribe** at all, so an application had to give
-   every connection a writer chain of its own and fan out through one channel
-   per connection: 32 channel sends, 32 wakeups and a task per delivery.
-
-The MR fixes all four, and adds the primitives they need (`Writer.grow`, a
-non-parking channel receive, and `Room`).
+1. **The write path and the fan-out.** `sendFrame` wrote the header and the
+   payload with two `write` + `flush` pairs; every frame cost two heap
+   allocations; there was no way to write a run of frames with one syscall and
+   no publish/subscribe at all, so an application had to fan out through one
+   channel per connection. The MR fixes all four and adds the primitives they
+   need (`Writer.grow`, a non-parking channel receive, and `Room`).
+2. **The runtime's queues.** The pool took a `SysLock` per queued task and per
+   submitted I/O op; the scheduler was **52% of the echo server's CPU**. Both
+   are lock-free now, which is −42% instructions per echoed message.
+3. **The per-message cost of a connection that is waiting.** In the flood
+   benchmark one poll carries ~19 messages; in a server holding thousands of
+   connections, one message is in flight per connection and a poll carries one.
+   The same code cost **5.7 µs of CPU per message there against 1.1 µs in the
+   flood**, and a profile named why: 16 chain re-submissions per message and a
+   hash-table delete per operation. Both are gone (+10% at 512 connections),
+   and the per-connection memory that made a big connection count impossible
+   came down from 12.0 KB to **9.0 KB** — four separate causes, none of them in
+   the WebSocket layer.
 
 Everything is additive: existing call sites keep their exact behaviour, and the
 wire bytes are unchanged (`tests/nimony/websocket/tframe.nim` checks them
@@ -46,26 +50,64 @@ between runs, so Bun and nimony are measured **interleaved** (Bun, nimony, Bun,
 nimony), 10 rounds per configuration, 3 repetitions each, medians reported; a
 3% difference is not a result.
 
-| | before | after (pair API) | after (`Room`) | Bun 1.4.4 |
-|---|---|---|---|---|
-| deliveries/s, 1 client process | 927,248 | 1,626,234 | **2,466,097** | 2,407,612 |
-| deliveries/s, 4 client processes | 824,417 | 1,792,313 | **7,457,286** | 7,331,348 |
-| server CPU per round, 1 process | 4.75 s | 2.85 s | 0.198 s | 0.108 s |
-| `io_uring_enter` per round | 1,478,997 | 45,595 | **3,558** | 49,765 `sendto` |
+Chat — the fan-out workload, one round is 51,200 publishes:
 
-Per change, each measured on its own with the pair API at one client process:
+| | before this MR | after | Bun 1.4.4 |
+|---|---|---|---|
+| deliveries/s, 1 client process | 927,248 | **2,431,989** | 2,494,737 |
+| deliveries/s, 4 client processes | 824,417 | **8,123,777** | 7,612,020 |
+| server CPU per round, 1 process | 4.75 s | 0.183 s | 0.104 s |
+| server CPU per round, 4 processes | — | 0.110 s | 0.103 s |
+| `io_uring_enter` per round | 1,478,997 | **3,558** | 49,765 `sendto` |
 
-| change | deliveries/s | server CPU per round |
-|---|---|---|
-| baseline | 927,248 | 4.75 s |
-| 1. one flush per frame | 1.22 M | 3.55 s |
-| 2. `flush = false` + `tryRecv` drain | 2.38 M | 1.74 s |
-| 3. frame spelled in place | 2.48 M | ~1.40 s |
+Plain echo — no fan-out at all, 51,200 messages and 51,200 deliveries a round
+(the "before" column is this MR before `TCP_NODELAY`, the one line that moved
+this benchmark):
 
-The syscall count is the clearest single number: **~0.9 `io_uring_enter` per
-delivered frame before, ~36 frames per call after, ~502 with the room** — the
-ring already batches up to 128 queued ops per `poll`, and the only reason it
-never had more than one was that the writer waited for each write to complete.
+| | before | after | Bun 1.4.4 |
+|---|---|---|---|
+| messages/s, 1 client process | 313,275 | **308,639** | 306,315 |
+| messages/s, 4 client processes | 675,817 | **1,167,314** | 1,090,936 |
+| messages/s, 2000-byte messages | — | **160,166** | 138,229 |
+
+The one row that is behind is the chat at one client process (−2.5%); it is the
+one where the client, not the server, is the limit, so what it measures is
+latency, and the last change in this MR trades a little of it for the rest (see
+"the many-connection regime" below).
+
+Scale — N connections held open, each ping-ponging as fast as it can, 8 s per
+run, medians of 2 runs, 4 client processes:
+
+| connections | Bun rate | nimony rate | ratio | Bun p50 | nimony p50 | Bun p99 | nimony p99 |
+|---|---|---|---|---|---|---|---|
+| 32 | 181,109 | 135,185 | 75% | 159 µs | 209 µs | 467 µs | 597 µs |
+| 128 | 339,214 | 261,291 | 77% | 303 µs | 415 µs | 1,356 µs | 1,725 µs |
+| 512 | 381,880 | 310,369 | 81% | 1,155 µs | **985 µs** | 4,356 µs | 6,767 µs |
+| 2048 | 309,344 | 240,852 | 78% | 6,338 µs | 7,310 µs | 12,757 µs | 22,115 µs |
+
+At a **fixed** offered rate, with the server's capacity never the limit
+(512 connections, one message each per interval):
+
+| offered | server | delivered | p50 | p99 | CPU |
+|---|---|---|---|---|---|
+| 5,120 msg/s | Bun | 5,063 | 3,843 µs | 13,009 µs | 0.08 |
+| 5,120 msg/s | nimony | **5,069** | **3,160 µs** | **9,994 µs** | 0.16 |
+| 51,200 msg/s | Bun | 46,435 | 1,038 µs | 5,390 µs | 0.32 |
+| 51,200 msg/s | nimony | **48,953** | **816 µs** | **4,042 µs** | 0.51 |
+
+Holding connections — 8192 connections, one echo each, then idle:
+
+| server | held | server RSS per connection | idle CPU |
+|---|---|---|---|
+| Bun `Bun.serve` | 8192 / 8192 | **1.7 KB** | 0.04 cores |
+| nimony, before this round | 8192 / 8192 | 12.0 KB | 0.05 cores |
+| nimony, after | 8192 / 8192 | **9.0 KB** | 0.06 cores |
+
+The syscall count is the clearest single number for the fan-out: **~0.9
+`io_uring_enter` per delivered frame before, ~36 frames per call after, ~502
+with the room** — the ring already batches up to 128 queued ops per `poll`, and
+the only reason it never had more than one was that the writer waited for each
+write to complete.
 
 ## What changed
 
@@ -136,6 +178,13 @@ never had more than one was that the writer waited for each write to complete.
   nothing is allocated once the buffer has grown.
 * `tryReadRecord` — one record from a record ring if one is already there,
   `false` when it is empty. Never parks.
+* **The read step adapts.** `readFd` reserved `ChunkSize` (16 KB) of spare room
+  before every read, and a reservation is what the buffer keeps — so a server
+  with 8000 quiet clients held 8000 sixteen-kilobyte buffers to receive forty
+  bytes each. The step now starts at `MinRead` (1 KB) and doubles only while a
+  read comes back full, up to `ChunkSize`, and falls back to `MinRead` when a
+  read comes back short. A quiet connection holds 1 KB; a flooding peer is at
+  16 KB reads within five reads, so the flood benchmark is unchanged.
 
 ### `lib/std/channels.nim`
 
@@ -153,6 +202,88 @@ while true:
     if not rx.recv(m): return   # park until there is something
   wr.send(mkText, m.text, flush = false)
 ```
+
+### `lib/std/threadpool.nim`: run a chain instead of re-queueing it
+
+In the many-connection regime a message is one poll, and a callgrind profile
+there put **24% of the instructions in `submit`** — 16 calls per message,
+because every step of a `.passive` chain (an echo is eight frames deep) was
+pushed to the work-stealing deque and popped again: two atomics, a division and
+a call per frame.
+
+`drainOnce` now runs a chain's next steps inline (`trampolineSteps`, 64) instead
+of re-queueing each one, and stops as soon as the backend reports a completion
+already published and not yet consumed (`gReactorHasReady` → the ring's shared
+tail, one atomic load). That gate is what makes the trade safe: a completion
+sitting in the queue is pure latency, so the worker goes back to `poll` rather
+than unwinding another chain. 512 connections: **275k → 303k msg/s, CPU 1.62 →
+1.44 cores** (medians of three alternating pairs), echo at four client
+processes **993k → 1.12M (+13%)**.
+
+This was tried once before, without the gate, and cost 13% of the echo's
+throughput; the difference is entirely the gate. The one row that still pays is
+the plain echo at one client process (−6%), where the client is the limit and
+the server is idle a third of the round: there, a worker that keeps unwinding
+delays the poll that has ~19 completions waiting.
+
+### `lib/std/ioring/core/slots.nim`: the fd is not a hash key
+
+The per-fd op lists were headed by a `Table[cint, nil Slot]`: one hash, one
+insert and one backshifting delete **per operation**, and `del` alone was 14.6%
+of the instructions in that profile. A descriptor is already a small dense
+integer, so the heads are a `seq[nil Slot]` indexed by `fd + 1` — the `+1`
+because `opTimeout` and `opNop` have no descriptor (`fd = -1`), which a table
+accepted and an array does not. Another **+8%** at 512 connections, and the
+lane's allocation is 16 KB for 2048 connections.
+
+### `lib/std/compress/deflate.nim`, `lib/std/httpserver.nim`: what a connection costs
+
+`Deflater` kept its symbol frequencies inline — `array[286, int]` and
+`array[30, int]`, 2.5 KB — and `Encoder` is a field of `HttpConnection`. Every
+connection therefore carried a DEFLATE histogram for a compressor that is off by
+default. The histograms moved to the heap, allocated once per *compressing*
+stream: `sizeof(HttpConnection)` **3320 → 824 bytes**. With the read step above,
+and with `std/socket` allocating its 8 KB + 8 KB buffers lazily instead of in
+`initSocket`, a held connection went from **12.0 KB to 9.0 KB** of server RSS.
+
+`listenHttp`'s backlog default was 128. A client opening 8192 connections at
+once overflowed it and **19% of them were lost to dropped SYNs**, which looks
+like a server that cannot accept a storm. The default is 1024 now (nginx and
+Node use 511); at 4096 the same run lost none.
+
+### `lib/std/httpserver.nim`, `lib/std/ioring.nim`
+
+* `accept` sets `TCP_NODELAY` on every connection (`setNoDelay`, one ring op).
+  The library never set it, so the kernel could hold a small write until the
+  previous one was acknowledged: for a server that answers in small messages
+  that is one extra round trip per reply, invisible in CPU and in syscall
+  counts and visible only as latency. The plain echo at four client processes
+  went from **676k to 1.03M messages/s** because of this one line, and its
+  p90 at 8 messages in flight fell from 112 µs to 85 µs. Every mainstream
+  server (Node, nginx, Bun) sets it on accept.
+* `setNoDelay` is public, so an application that wants Nagle back can ask for
+  it, and an application on a raw socket can use it without the HTTP layer.
+
+### `lib/std/threadpool.nim`, `lib/std/ioring/core/backend.nim`: the queues
+
+* A lane's deferred ops have one consumer (that lane's `poll`) and, for a
+  worker, one producer — the same thread, since a worker submits its ops from
+  the continuations it runs. So `gOpQueues[lane]` is an `OpQueue` whose
+  owner-side queue is a plain `LocalRing`: no lock, no atomics. The locked
+  `FifoStripe` stays for the two multi-producer cases (the trailing lane shared
+  by every non-worker thread, and iocp's cross-lane routing).
+* `localQueues` is a set of Chase-Lev work-stealing deques: the owner pushes at
+  `bottom` (its only writer), and the owner and thieves alike take from `top`
+  with one compare-exchange per batch, so `BulkSize` tasks cost one atomic
+  operation. A push from a thread that is not the owner still takes the locked
+  FIFO.
+* `deliver` submits a resumed chain without an `fd` hint, so it is staged on the
+  polling lane instead of being pushed into another worker's stripe.
+* The per-worker counters are behind `-d:threadpoolMetrics`; without it
+  `countMetric` compiles to nothing and `workerMetrics` is never allocated.
+  They were on the hottest lines and nothing in the library reads them.
+* Instructions per echoed message (callgrind, same workload): 6,497 with the
+  locked queues, 4,082 with the `LocalRing` op queue, 3,736 with the deques.
 
 ## What was tried and rejected
 
@@ -177,49 +308,22 @@ controls *how much* is in the buffer when the op is created.
 
 The hook was removed; the change set is what measured best.
 
-**Trampolining a chain inline.** `drainOnce` re-submits a continuation that
-yields more work, so a chain's next step goes back through the queue — ~20
-submits per echoed message. Running the chain inline until it parks cuts that to
-~0.3 and 12% of the echo's CPU, and costs 13% of its throughput (309k → 269k at
-one client process): a worker cannot poll its own io_uring lane while it runs,
-so every deferred poll is deferred latency, and the echo is latency-bound. The
-room is neutral. Reverted. (In a `Room` the
-batch comes from the room's queue instead, which is why the room does not need
-the per-frame flush at all.)
+**Trampolining a chain inline — the first attempt.** `drainOnce` re-submits a
+continuation that yields more work, so a chain's next step goes back through the
+queue — ~20 submits per echoed message. Running the chain inline until it parks
+cuts that to ~0.3 and 12% of the echo's CPU, and cost 13% of its throughput
+(309k → 269k at one client process): a worker cannot poll its own io_uring lane
+while it runs, so every deferred poll is deferred latency, and that benchmark is
+latency-bound. It was reverted.
 
-### `lib/std/httpserver.nim`, `lib/std/ioring.nim`
-
-* `accept` sets `TCP_NODELAY` on every connection (`setNoDelay`, one ring op).
-  The library never set it, so the kernel could hold a small write until the
-  previous one was acknowledged: for a server that answers in small messages
-  that is one extra round trip per reply, invisible in CPU and in syscall
-  counts and visible only as latency. The plain echo at four client processes
-  went from **676k to 1.03M messages/s** because of this one line, and its
-  p90 at 8 messages in flight fell from 112 µs to 85 µs. Every mainstream
-  server (Node, nginx, Bun) sets it on accept.
-* `setNoDelay` is public, so an application that wants Nagle back can ask for
-  it, and an application on a raw socket can use it without the HTTP layer.
-
-### `lib/std/threadpool.nim`, `lib/std/ioring/core/backend.nim`
-
-* A lane's deferred ops have one consumer (that lane's `poll`) and, for a
-  worker, one producer — the same thread, since a worker submits its ops from
-  the continuations it runs. So `gOpQueues[lane]` is an `OpQueue` whose
-  owner-side queue is a plain `LocalRing`: no lock, no atomics. The locked
-  `FifoStripe` stays for the two multi-producer cases (the trailing lane shared
-  by every non-worker thread, and iocp's cross-lane routing).
-* `localQueues` is a set of Chase-Lev work-stealing deques: the owner pushes at
-  `bottom` (its only writer), and the owner and thieves alike take from `top`
-  with one compare-exchange per batch, so `BulkSize` tasks cost one atomic
-  operation. A push from a thread that is not the owner still takes the locked
-  FIFO.
-* `deliver` submits a resumed chain without an `fd` hint, so it is staged on the
-  polling lane instead of being pushed into another worker's stripe.
-* The per-worker counters are behind `-d:threadpoolMetrics`; without it
-  `countMetric` compiles to nothing and `workerMetrics` is never allocated.
-  They were on the hottest lines and nothing in the library reads them.
-* Instructions per echoed message (callgrind, same workload): 6,497 with the
-  locked queues, 4,082 with the `LocalRing` op queue, 3,736 with the deques.
+The second attempt is in this MR and it works, because the two things it lacked
+are now there: the loop is the drain loop rather than `submit`'s caller-runs
+path, and it **stops as soon as the backend reports a published completion**
+(`gReactorHasReady`). Without that gate the worker keeps unwinding while
+completions sit in the ring, which is exactly the latency the first attempt
+paid for; with it, the trampoline only ever runs when there is nothing waiting
+to be polled. It is +13% on the echo at four client processes and +10% at 512
+connections, and −6% on the one row where the client is the limit.
 
 ## Testing
 
@@ -229,12 +333,23 @@ the per-frame flush at all.)
   handshake, the three length forms, fragments, pings, and the protocol
   violations a server has to refuse.
 * A plain echo server (`src/echoserver.nim`, no room at all) is at
-  297k messages/s against Bun's 252k with one client process (+18%), and
-  1.03M against 1.04M with four, on 1.4× Bun's CPU per message.
+  309k messages/s against Bun's 306k with one client process (+0.8%), 1.17M
+  against 1.09M with four (+7%), and 160k against 138k on 2000-byte messages
+  (+16%), on 1.1–1.2× Bun's CPU per message.
 * `scripts/run-scale.sh` holds 32…2048 connections open, each ping-ponging:
-  every connection is accepted (2048/2048, no errors) at 66–81% of Bun's
-  aggregate rate, with a comparable or better median RTT and a p99 ~1.6× worse.
-  At a fixed offered rate the medians match and nimony's p99 is better.
+  every connection is accepted (2048/2048, no errors) at 75–81% of Bun's
+  aggregate rate, with a comparable or better median RTT at 512 connections
+  (985 µs against 1,155 µs) and a p99 ~1.6× worse. At a fixed offered rate
+  nimony delivers more, at a lower median and a lower p99 (816 µs / 4.0 ms
+  against 1,038 µs / 5.4 ms at 51,200 msg/s offered).
+* `scripts/run-conns.sh` holds 8192 connections open and idle after one echo
+  each: both servers keep every one of them, nimony at 9.0 KB of server RSS per
+  connection against Bun's 1.7 KB, and idle CPU is flat in the connection count
+  (0.06 cores, the pool's periodic wakeup, against Bun's 0.04). A 32,768
+  connection run stops at 28,228 held for *both* servers — the loopback
+  ephemeral port range, not either server.
+* `tests/nimony/stdlib/tgzip.nim` and `tests/nimony/http/tcompress.nim` cover
+  the `Deflater` whose histograms moved to the heap.
 * `tests/nimony/websocket/troom.nim` (new) — a room over a real socket:
   `ws.publish` reaches every member including the sender, `ws.send` reaches one
   connection only, a publish to a parent topic reaches the topics below it and
@@ -256,6 +371,12 @@ reproduces the table).
   flush of an empty buffer is free.
 * `frameHeader`, `writeProto` and every other existing public signature are
   unchanged.
+* Two defaults changed, both towards what a server wants: `listenHttp`'s
+  `backlog` is 1024 (was 128, which loses connections in a burst), and a
+  `Reader` starts with a 1 KB read step instead of reserving 16 KB (it still
+  reaches 16 KB reads as soon as the peer fills it).
+* `std/socket` allocates its read and write buffers on first use instead of in
+  `initSocket`; `Socket.buffered`, `peek` and `take` are unchanged.
 * New API only: `Writer.grow`, `Reader.tryReadRecord`, `Receiver.tryRecv`,
   `WebSocketReader.buffered`, `WebSocketWriter.flush`, `WebSocket.flush`, the
   `flush` parameter on `send`,
@@ -266,6 +387,18 @@ reproduces the table).
 
 ## Follow-ups (not in this MR)
 
+* **What is left of the 9 KB per connection.** A connection that only accepts
+  and parks costs 4.6 KB, so about half of the upgraded idle connection is the
+  `WebSocket` object, the parked echo chain and the writer's outbox. The next
+  steps, in order: reuse the per-connection objects from a per-lane pool (they
+  are allocated and freed in the same lane), shrink the frames (the echo frame
+  holds a whole `WebSocket` by value), and the allocator's page granularity — a
+  2 KB chunk still touches a 4 KB page.
+* **The p99 in the many-connection case** is ~1.6× Bun's while the median is
+  better. A worker cannot poll its own lane while it runs a continuation, so a
+  long chain delays every completion on that lane; that is also why the
+  trampoline needs the `gReactorHasReady` gate, and why a bigger
+  `trampolineSteps` is not automatically better.
 * The room's turn ends by flushing its members one after another, and each
   flush waits for its own write, so those waits are sequential. Overlapping
   them — submit the turn's writes, wait once — needs "submit without waiting"

@@ -8,17 +8,22 @@ workload: 32 clients, every message echoed to all of them, one round =
 shared and drifts by ~10%, so Bun and nimony are measured alternately and the
 medians of 3 repetitions are reported. A 3% difference is not a result.
 
+The same work also made the many-connection case viable: 512 connections
+ping-ponging went from 275k to 303k msg/s, and the memory a held connection
+costs came down from 12.0 KB to 9.0 KB — see "Holding connections" below.
+
 ## Headline
 
 | | before | after | Bun 1.4.4 |
 |---|---|---|---|
-| deliveries/s, 1 client process | 927,248 | **2,466,097** | 2,407,612 |
-| deliveries/s, 4 client processes | 824,417 | **7,457,286** | 7,331,348 |
-| server CPU per round, 1 process | 4.75 s | 0.198 s | 0.108 s |
+| deliveries/s, 1 client process | 927,248 | **2,431,989** | 2,494,737 |
+| deliveries/s, 4 client processes | 824,417 | **8,123,777** | 7,612,020 |
+| server CPU per round, 1 process | 4.75 s | 0.183 s | 0.104 s |
 | `io_uring_enter` per round | 1,478,997 | **3,558** | 49,765 `sendto` |
 
-2.7× more throughput at one client process and 9.0× at four, ahead of Bun at
-both splits (+2.4% and +1.7%), on ~1.4× Bun's server CPU instead of 15×.
+2.6× more throughput at one client process and 9.9× at four, level at one
+client process (−2.5%) and ahead at four (+6.7%), on ~1.1–1.8× Bun's server CPU
+instead of 15×.
 
 The runtime underneath was part of the work: the ring's op queue and the pool's
 task queue both took a `SysLock` per operation. They are now a same-thread ring
@@ -73,12 +78,13 @@ per round.
 
 | | 1 client process | 4 client processes | server CPU per message |
 |---|---|---|---|
-| Bun | 251,697 msg/s | 1,038,679 msg/s | 0.80 µs |
-| nimony | **297,445 msg/s** | **1,026,582 msg/s** | 1.10 µs |
+| Bun | 306,315 msg/s | 1,090,936 msg/s | 0.80 µs |
+| nimony | **308,639 msg/s** | **1,167,314 msg/s** | 1.10 µs |
 
-Ahead at one client process (+18%), level at four (−1.2%), on 1.4× Bun's CPU
-per message (it was 2.6×). With 2000-byte messages (per-message cost spread over
-133× more bytes) nimony is ahead too: 147,904 against 133,921 msg/s.
+Level at one client process (+0.8%), ahead at four (+7.0%), on 1.1–1.2× Bun's
+CPU per message (it was 2.6×). With 2000-byte messages (per-message cost spread
+over 133× more bytes) nimony is ahead too: 160,166 against 138,229 msg/s
+(+15.9%).
 
 **The four-process row was 57% of Bun until `TCP_NODELAY` was set on accept.**
 The kernel was holding each small write until the previous one was
@@ -86,10 +92,13 @@ acknowledged, so every reply cost an extra round trip — invisible in CPU and i
 syscall counts, visible only as a latency that did not fall with concurrency.
 One ring op per connection fixed it: 676k → 1.03M messages/s.
 
-Trampolining a chain inline (running a continuation's next steps on the same
-worker instead of re-queueing them) cuts the echo's CPU by 12% and its
-throughput by 13%: a worker cannot poll its own io_uring lane while it runs, so
-every deferred poll is deferred latency. Reverted.
+**Trampolining a chain inline** (running a continuation's next steps on the
+same worker instead of re-queueing them) was tried here first and cost 13% of
+this benchmark: a worker cannot poll its own io_uring lane while it runs, so
+every deferred poll is deferred latency. It came back in this round with the one
+thing it was missing — the loop stops as soon as the backend reports a published
+completion — and it is now +13% on this row and +10% at 512 connections. It
+still costs the *one*-client-process echo ~6%, which is client-bound.
 
 ## Holding connections
 
@@ -120,23 +129,32 @@ medians of 2 runs, 4 client processes.
 
 | connections | Bun rate | nimony rate | ratio | Bun p99 | nimony p99 |
 |---|---|---|---|---|---|
-| 32 | 171,674 | 125,441 | 73% | 492 µs | 641 µs |
-| 128 | 376,843 | 256,695 | 68% | 812 µs | 2,379 µs |
-| 512 | 395,067 | 298,846 | 76% | 3,812 µs | 6,919 µs |
-| 2048 | 334,689 | 222,106 | 66% | 12,877 µs | 20,458 µs |
+| 32 | 181,109 | 135,185 | 75% | 467 µs | 597 µs |
+| 128 | 339,214 | 261,291 | 77% | 1,356 µs | 1,725 µs |
+| 512 | 381,880 | 310,369 | 81% | 4,356 µs | 6,767 µs |
+| 2048 | 309,344 | 240,852 | 78% | 12,757 µs | 22,115 µs |
 
 Every connection is held (2048/2048, no errors) by both. nimony's median
-latency is comparable or better, its tail is ~1.6× worse, and it spends 1.6–1.9×
-Bun's CPU. At a *fixed* offered rate the two are level on the median and nimony
-is better at p99 (4.7 ms against 5.6 ms at 51,200 msg/s offered) — that is the
-thread pool's trade: twice the CPU, three cores of headroom.
+latency is better at 512 connections (985 µs against 1,155 µs), its tail is
+~1.6× worse, and it spends 1.4–1.7× Bun's CPU (was 1.6–1.9×). At a *fixed*
+offered rate nimony delivers more, at a lower median and a lower tail (816 µs /
+4.0 ms against 1,038 µs / 5.4 ms at 51,200 msg/s offered) — that is the thread
+pool's trade: 1.6× the CPU of a single-threaded server that is one thread away
+from its ceiling.
 
-What Bun wins in the many-connection case is syscall batching: one `epoll_wait`
-collects every ready socket, one `sendto` carries ~32 replies, while the ring
-does ~3 `io_uring_enter` per burst of ~19 messages.
+What is left of Bun's advantage in the `max` rows is syscall batching: one
+`epoll_wait` collects every ready socket, one `sendto` carries ~32 replies, while
+the ring does ~3 `io_uring_enter` per burst of ~19 messages.
 
 ## What is left
 
+* The other half of the 9 KB per connection: a connection that only accepts and
+  parks costs 4.6 KB, so the `WebSocket` object, the parked echo chain and the
+  writer's outbox are the rest. Reusing the per-connection objects from a
+  per-lane pool, shrinking the frames (the echo frame holds a `WebSocket` by
+  value), and the allocator's page granularity are the next three.
+* The p99 in the `max` rows: a worker cannot poll its own lane while it runs a
+  continuation, so a long chain delays every completion on that lane.
 * A turn flushes its members one after another, and each flush waits for its
   own write. Overlapping those waits needs "submit without waiting" plus "wait
   for the drain"; the deferred-submit variant alone measured *worse*
