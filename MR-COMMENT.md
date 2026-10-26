@@ -50,7 +50,7 @@ and a callgrind profile of that regime named two things.
   64) and **stops as soon as the backend reports a completion already published
   and not yet consumed** (`gReactorHasReady` → one atomic load of the ring's
   shared tail). That gate is the whole difference from the attempt that was
-  rejected earlier in the MR: without it the worker keeps unwinding while
+  rejected in an earlier round: without it the worker keeps unwinding while
   completions sit in the ring, which is pure latency.
 * **The slot arena keyed its per-fd lists by a `Table[cint, nil Slot]`** — one
   hash, one insert and one backshifting delete *per operation*; `del` alone was
