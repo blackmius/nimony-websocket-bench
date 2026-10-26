@@ -1,0 +1,1 @@
+echo-nimony-2x32       2 client proc(s)  round=  172.7 ms  aggregate=   579295 msg/s  server_cpu=  1.46s  alive=yes

@@ -81,14 +81,62 @@ io_uring lane while it runs: every deferred poll is deferred latency. The chat
 is neutral. Reverted, with the numbers recorded so the next attempt starts from
 them.
 
-## What is left
+## The four-process echo: what it is, and what it is not
 
-The four-process echo is no longer CPU-bound: the server spends 0.056 s of CPU
-on a round that takes 76 ms, so it is idle a third of the round and the other
-workers are idle throughout. Bun wins there on the number of I/O round trips
-per message — one `epoll_wait` for many ready sockets, against one ring
-submission and one completion per read and per write. That is in the I/O
-design, not in the scheduler.
+It is **not capacity**. Give the same server more connections and it matches
+Bun:
+
+| echo configuration | nimony | Bun |
+|---|---|---|
+| 4 client procs × 8 connections | 675,817 | 1,186,888 |
+| 4 client procs × 32 connections | 980,222 / 1,016,940 | 1,146,013 / 1,026,996 |
+| 2 client procs × 32 connections | 592,951 / 579,295 | 596,039 / 610,383 |
+
+At 128 connections nimony reaches 88–99% of Bun; at 32 it reaches 57%. So what
+the 4×8 row measures is **per-message latency at low concurrency**, not
+throughput: nimony needs ~4× the in-flight messages to saturate.
+
+It is **not CPU** either. Per-thread accounting (the harness sums the threads)
+shows the three workers balanced — 0.22 s / 0.22 s / 0.19 s over a ten-round
+run — and each one busy only ~28% of a 76 ms round.
+
+It is **not syscalls**. `strace -c` over the same workload: nimony 2,729
+`io_uring_enter` per round against Bun's 3,070 (`recvfrom` + `sendto` +
+`epoll_pwait2`). And it is not the client: the four Node processes spend 2.64 s
+against nimony and 2.38 s against Bun for the same work.
+
+Measured latency, one connection, strict ping-pong (`hrtime`, 4000 samples):
+
+| | 1 in flight | 8 in flight |
+|---|---|---|
+| nimony | p50 48.4 µs, mean 52 µs | p50 46.2 µs, mean 145 µs |
+| Bun | p50 45.4 µs, mean 49.5 µs | p50 41.8 µs, mean 55 µs |
+
+At one message in flight the two are the same. Under pipelining nimony's mean
+triples while Bun's does not: its per-message latency does not fall with
+concurrency, so throughput stays `in-flight / 47 µs` while Bun's becomes
+`in-flight / 27 µs`.
+
+Three things were tried against this and rejected on measurement:
+
+* **Do not park on the write.** `writeFd` copied the bytes and submitted the
+  write fire-and-forget (throwaway patch, buffer ownership not addressed):
+  647–670 k, no change.
+* **Bigger read bursts.** `ChunkSize` 4 KB / 16 KB / 64 KB: 627–654 k, no
+  change.
+* **Never sleep in the kernel.** Forcing the reactor to busy-poll instead of
+  `submitAndWait` made it *worse* — 415 k — because three spinning workers take
+  the cores the four client processes need. The server has idle CPU, but that
+  CPU is not free.
+
+What is left is the chain itself: a message costs a read completion, a pool
+dispatch of the resumed continuation, the parse/append, and a write op — and at
+32 connections there is not enough in flight to hide that. Bun's single-thread
+loop does the same work in one wakeup with no cross-thread dispatch. The
+promising directions are therefore fewer pool hops per completion (run the
+resumed step in `deliver` instead of re-queueing it — worth re-measuring now
+that the queues are lock-free) and fewer continuations per message (the echo
+path takes ~20), not more threads or more CPU.
 
 Two smaller items: allocation is now the largest single block of the echo's CPU
 (13%, ~6 allocations per message), and a chain still takes ~20 queue round
