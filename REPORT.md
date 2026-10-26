@@ -10,15 +10,16 @@ workload: 32 clients, every message echoed to all of them, one round =
 
 | | before | after | Bun 1.4.4 |
 |---|---|---|---|
-| deliveries/s, 1 client process | 927,248 | **2,687,542** | 2,527,099 |
-| deliveries/s, 4 client processes | 824,417 | **6,378,984** | 7,559,182 |
+| deliveries/s, 1 client process | 927,248 | **2,660,163** | 2,510,418 |
+| deliveries/s, 4 client processes | 824,417 | **6,429,569** | 7,294,423 |
 | server CPU per round, 1 process | 4.75 s | **0.12 s** | ~0.09 s |
 | `io_uring_enter` per round | 1,478,997 | **3,558** | 49,765 `sendto` |
 
-2.9× more throughput at one client process, 8.1× at four, 40× less CPU per
+2.9× more throughput at one client process, 7.8× at four, ~40× less CPU per
 round, and 416× fewer syscalls. With one client process nimony is ahead of Bun
-(the client is the bottleneck there); with four it is at 91% of it, on 1.3×
-Bun's server CPU instead of 15×.
+(the client is the bottleneck there); with four it is at
+88% of it, on
+1.2× Bun's server CPU instead of 15×.
 
 ## Where it came from, in order
 
@@ -66,10 +67,11 @@ per round.
 
 | | 1 client process | 4 client processes | server CPU per message |
 |---|---|---|---|
-| Bun | 290,701 msg/s | 742,101 msg/s | 0.66 µs |
-| nimony | **287,171 msg/s** | **562,025 msg/s** | 1.3 µs |
+| Bun | 282,549 msg/s | 855,261 msg/s | 0.74 µs |
+| nimony | **297,443 msg/s** | **536,031 msg/s** | 1.21 µs |
 
-Level with Bun at one client process, 76% at four, on 2× Bun's CPU per message.
+Level with Bun at one client process, 63% at four, on
+1.6× Bun's CPU per message.
 The syscalls are fine — 15 messages per `io_uring_enter`, against Bun's 33 per
 `sendto` — and getting there needed one change: the pair's `recv` flushed on
 *every* call, undoing `send(flush = false)`, so an echo reply cost a write of

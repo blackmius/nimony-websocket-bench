@@ -27,16 +27,13 @@ One round is 32 clients × 1600 messages each, every message fanned out to all
 
 | server | client procs | round | deliveries/s | server CPU |
 |---|---|---|---|---|
-| Bun `Bun.serve` | 1 × 32 | 637 ms | **2,527,099** | 0.50 s |
-| Bun `Bun.serve` | 4 × 8 | 214 ms | **7,559,182** | 0.44 s |
-| nimony, `Room` | 1 × 32 | 601 ms | **2,687,542** | 0.80 s |
-| nimony, `Room` | 2 × 16 | 355 ms | **4,455,424** | 0.67 s |
-| nimony, `Room` | 4 × 8 | 246 ms | **6,378,984** | 0.57 s |
-| nimony, writer per connection | 1 × 32 | 648 ms | **2,474,128** | 6.99 s |
-| nimony, writer per connection | 4 × 8 | 571 ms | **2,729,327** | 5.59 s |
-
-The Bun 4×8 row is the noisiest (6.4–7.6 M across runs on this shared box);
-nimony's 4×8 row is 6.4–6.8 M across runs.
+| Bun `Bun.serve` | 1 × 32 | 641 ms | **2,510,418** | 0.51 s |
+| Bun `Bun.serve` | 4 × 8 | 226 ms | **7,294,423** | 0.47 s |
+| nimony, `Room` | 1 × 32 | 605 ms | **2,660,163** | 0.74 s |
+| nimony, `Room` | 2 × 16 | 345 ms | **4,622,467** | 0.56 s |
+| nimony, `Room` | 4 × 8 | 245 ms | **6,429,569** | 0.56 s |
+| nimony, writer per connection | 1 × 32 | 635 ms | **2,461,348** | 7.20 s |
+| nimony, writer per connection | 4 × 8 | 615 ms | **2,619,109** | 6.18 s |
 
 Per single message (one connection, 1600 round trips, no fan-out):
 nimony **32,228 msg/s** (~50 ms per 1600 round trips, ~31 µs each),
@@ -44,10 +41,10 @@ Bun **183,876 msg/s** (~8.7 ms, ~5 µs each).
 
 Reading the table:
 
-* **With one client process nimony is ahead** (2.69 M against 2.53 M): there the
+* **With one client process nimony is ahead** (2.66 M against 2.51 M): there the
   client is the bottleneck, and the room's turn costs less than Bun's loop.
-* **Bun is still ahead with four client processes** — 7.56 M against 6.38 M —
-  but by 18%, not by 3×. nimony's server CPU is *flat* at 0.6–0.8 s whatever
+* **Bun is still ahead with four client processes** — 7.29 M against 6.43 M —
+  but by 12%, not by 3×. nimony's server CPU is *flat* at 0.6–0.8 s whatever
   the split, against Bun's 0.45–0.49 s: a 1.3× difference, not a 15× one.
 * The last two rows are the same room with a writer chain per connection,
   which is what the library's one-writer-per-connection rule forces an
@@ -204,9 +201,9 @@ kept as `src/chatserver-conn.nim` for the comparison.
 
 | | writer per connection | `Room` (tree) |
 |---|---|---|
-| deliveries/s, 1 client process | 2,477,026 | **2,665,439** |
-| deliveries/s, 4 client processes | 3,088,521 | **6,689,450** |
-| server CPU per round | 1.04–1.22 s | **0.12 s** |
+| deliveries/s, 1 client process | 2,461,348 | **2,660,163** |
+| deliveries/s, 4 client processes | 2,619,109 | **6,429,569** |
+| server CPU per round | 1.44–1.24 s | **0.15 s** |
 | `io_uring_enter` per round | 45,595 | **3,558** |
 
 The room is 2.2× faster than a writer chain per connection with four client
@@ -227,15 +224,16 @@ round is 32 × 1600 = 51,200 messages and 51,200 deliveries.
 
 | | round | messages/s | server CPU per round | per message |
 |---|---|---|---|---|
-| Bun `Bun.serve` | 165 ms | **290,701** | 0.108 s | 0.66 µs |
-| nimony `std/websocket` | 172 ms | **287,171** | 0.122 s | 1.3 µs |
-| Bun `Bun.serve` | 64 ms | **742,101** | 0.034 s | 0.66 µs |
-| nimony `std/websocket` | 90 ms | **562,025** | 0.066 s | 1.3 µs |
+| Bun `Bun.serve` | 168 ms | **282,549** | 0.114 s | 2.23 µs |
+| nimony `std/websocket` | 165 ms | **297,443** | 0.120 s | 2.34 µs |
+| Bun `Bun.serve` | 65 ms | **855,261** | 0.038 s | 0.74 µs |
+| nimony `std/websocket` | 98 ms | **536,031** | 0.062 s | 1.21 µs |
 
 (upper rows: one client process, lower rows: four)
 
-So with one client process nimony is level with Bun on a plain echo, and with
-four it is at 76% on twice Bun's CPU per message. The syscalls are not the
+So with one client process nimony is level with Bun on a plain echo (it was
+ahead on the previous run, so the two are within the noise of this box), and
+with four it is at 63% on 1.6× Bun's CPU per message. The syscalls are not the
 problem: 3,436 `io_uring_enter` per round is **15 messages per write**, against
 Bun's 33 per `sendto`.
 

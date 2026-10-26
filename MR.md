@@ -40,9 +40,9 @@ Median of 5 rounds, `nimony c -d:release`, 4-core aarch64.
 
 | | before | after (pair API) | after (`Room`) | Bun 1.4.4 |
 |---|---|---|---|---|
-| deliveries/s, 1 client process | 927,248 | 2,477,026 | **2,665,439** | 2,515,891 |
-| deliveries/s, 4 client processes | 824,417 | 3,088,521 | **6,689,450** | 7,353,584 |
-| server CPU per round, 1 process | 4.75 s | 1.04–1.22 s | 0.12 s | ~0.09 s |
+| deliveries/s, 1 client process | 927,248 | 2,461,348 | **2,660,163** | 2,510,418 |
+| deliveries/s, 4 client processes | 824,417 | 2,619,109 | **6,429,569** | 7,294,423 |
+| server CPU per round, 1 process | 4.75 s | 1.44 s | 0.15 s | 0.10 s |
 | `io_uring_enter` per round | 1,478,997 | 45,595 | **3,558** | 49,765 `sendto` |
 
 Per change, each measured on its own with the pair API at one client process:
@@ -176,9 +176,10 @@ the per-frame flush at all.)
 * `tests/nimony/websocket/tserver.nim` — 31 cases over a real socket: the
   handshake, the three length forms, fragments, pings, and the protocol
   violations a server has to refuse.
-* A plain echo server (`src/echoserver.nim`, no room at all) is at 287k
-  messages/s against Bun's 291k with one client process, and 562k against 742k
-  with four, on 2× Bun's CPU per message. 15 messages per `io_uring_enter`,
+* A plain echo server (`src/echoserver.nim`, no room at all) is at
+  297k messages/s against Bun's 283k with one client
+  process, and 536k against 855k with four, on
+  1.6× Bun's CPU per message. 15 messages per `io_uring_enter`,
   against Bun's 33 per `sendto`.
 * `tests/nimony/websocket/troom.nim` (new) — a room over a real socket:
   `ws.publish` reaches every member including the sender, `ws.send` reaches one
