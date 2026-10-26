@@ -9,7 +9,7 @@
 set -eu
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
 cd "$ROOT"
-export ROUNDS=${ROUNDS:-5}
+export ROUNDS=${ROUNDS:-10}
 
 if [ ! -x bin/chatserver ] || [ ! -x bin/chatserver-conn ]; then
   echo "bin/chatserver missing; run scripts/build.sh first" >&2

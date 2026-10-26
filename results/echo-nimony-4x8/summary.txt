@@ -1,1 +1,1 @@
-echo-nimony-4x8        4 client proc(s)  round=   91.2 ms  aggregate=   543130 msg/s  server_cpu=  0.37s  alive=yes
+echo-nimony-4x8        4 client proc(s)  round=   83.7 ms  aggregate=   619141 msg/s  server_cpu=  0.63s  alive=yes

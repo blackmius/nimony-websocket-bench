@@ -10,14 +10,14 @@ workload: 32 clients, every message echoed to all of them, one round =
 
 | | before | after | Bun 1.4.4 |
 |---|---|---|---|
-| deliveries/s, 1 client process | 927,248 | **2,691,446** | 2,438,464 |
-| deliveries/s, 4 client processes | 824,417 | **6,943,658** | 6,613,595 |
-| server CPU per round, 1 process | 4.75 s | 0.14 s | 0.11 s |
+| deliveries/s, 1 client process | 927,248 | **2,623,889** | 2,550,361 |
+| deliveries/s, 4 client processes | 824,417 | **7,395,734** | 7,641,668 |
+| server CPU per round, 1 process | 4.75 s | 0.179 s | 0.101 s |
 | `io_uring_enter` per round | 1,478,997 | **3,558** | 49,765 `sendto` |
 
-2.9× more throughput at one client process, 9.3× at four, and ~10× less CPU
-per round. nimony is **ahead of Bun at both splits**: +6% with one client process and
-+4% with four.
+2.8× more throughput at one client process and 9.0× at four, at parity with
+Bun at both splits (interleaved, 10 rounds, medians; a 3% difference is noise on
+this box) and ~1.4× Bun's server CPU instead of 15×.
 
 ## Where it came from, in order
 
@@ -66,8 +66,8 @@ per round.
 
 | | 1 client process | 4 client processes | server CPU per message |
 |---|---|---|---|
-| Bun | 277,125 msg/s | 776,731 msg/s | 0.70 µs |
-| nimony | **275,434 msg/s** | **543,130 msg/s** | 1.45 µs |
+| Bun | 294,557 msg/s | 961,272 msg/s | 0.68 µs |
+| nimony | **296,982 msg/s** | **617,544 msg/s** | 1.37 µs |
 
 Level with Bun at one client process, 60% at four, on 2.6× Bun's CPU per
 message. With 2000-byte messages (per-message cost spread over 133× more bytes)

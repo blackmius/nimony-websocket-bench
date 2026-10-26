@@ -7,7 +7,7 @@
 set -eu
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
 cd "$ROOT"
-export ROUNDS=${ROUNDS:-5}
+export ROUNDS=${ROUNDS:-10}
 export READY=0                 # no "ready" broadcast: the client sends at once
 export TOTAL_CLIENTS_OVERRIDE=1 # each client counts only its own echoes
 

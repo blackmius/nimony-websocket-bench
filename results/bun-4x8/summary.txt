@@ -1,1 +1,1 @@
-bun-4x8                4 client proc(s)  round=  256.9 ms  aggregate=  6613595 msg/s  server_cpu=  0.53s  alive=yes
+bun-4x8                4 client proc(s)  round=  210.3 ms  aggregate=  7641668 msg/s  server_cpu=  0.98s  alive=yes
