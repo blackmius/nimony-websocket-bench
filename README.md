@@ -372,8 +372,9 @@ A third server, written in Rust on the [`wtx`](https://crates.io/crates/wtx)
 crate, runs the same two workloads through the same client: `rust/wtx-server`
 is the low-level API of wtx 0.52 (`WebSocketAcceptor`, one tokio task per
 connection), because wtx is a protocol implementation and not a framework —
-that is the code its own `web-socket-server` example is. Both are ~70 lines:
-`bin/wtx-echo` and `bin/wtx-chat`, built by `scripts/build-rust.sh`.
+that is the code its own `web-socket-server` example is. `bin/wtx-echo` is ~70
+lines, `bin/wtx-chat` ~150 (the fan-out, a writer task per connection);
+`scripts/build-rust.sh` builds both.
 
 `REPS=3 scripts/run-rust.sh` measures the three servers *in rotation*
 (Bun, nimony, wtx / nimony, wtx, Bun / wtx, Bun, nimony), so no side is always
@@ -414,7 +415,7 @@ buffers, and it gives such an adapter no point at which to flush. The
 nimony's own `Room` does instead — one frame encoded per publish, appended to
 each member's buffer, one `io_uring_enter` per ~461 of them.
 
-It holds connections at the same cost as the others: `scripts/run-conns.sh 8192
+It holds connections as easily as the others: `scripts/run-conns.sh 8192
 ./bin/wtx-echo` opens 8192, echoes 8192 and holds **8192/8192 at 11.8 KB of
 server RSS each**, 0.06 idle cores (three runs, the same number every time).
 The same script against `./bin/echoserver` from this tree reads 9.1 KB in
