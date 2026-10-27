@@ -366,6 +366,60 @@ string instead of a buffer of the reader's that was freed and copied out on
 every message — so a handler that keeps its `msg` across calls allocates
 nothing per message.
 
+## Where wtx (Rust) sits
+
+A third server, written in Rust on the [`wtx`](https://crates.io/crates/wtx)
+crate, runs the same two workloads through the same client: `rust/wtx-server`
+is the low-level API of wtx 0.52 (`WebSocketAcceptor`, one tokio task per
+connection), because wtx is a protocol implementation and not a framework —
+that is the code its own `web-socket-server` example is. Both are ~70 lines:
+`bin/wtx-echo` and `bin/wtx-chat`, built by `scripts/build-rust.sh`.
+
+`REPS=3 scripts/run-rust.sh` measures the three servers *in rotation*
+(Bun, nimony, wtx / nimony, wtx, Bun / wtx, Bun, nimony), so no side is always
+the one measured first. Medians of 3 repetitions, 10 rounds per chat run and 20
+per echo run:
+
+| workload | Bun | nimony | wtx |
+|---|---|---|---|
+| chat, 1 client process | **2,488,162** | 2,403,859 | 2,247,476 |
+| chat, 4 client processes | 7,968,171 | **8,112,098** | 1,767,378 |
+| echo, 1 client process | 275,387 | 278,878 | **287,897** |
+| echo, 4 client processes | 1,039,793 | **1,132,036** | 1,073,080 |
+| echo, 2000-byte messages | 139,667 | **152,890** | 137,794 |
+| chat, server CPU per round | 0.10 s | 0.21 s | **0.77 s** |
+
+The echo is level: three implementations of the same protocol, within the ±3%
+noise of the box at one client process and within 9% at four. The chat is not,
+and the reason is visible in the syscall count of one round (1,638,400 frame
+deliveries):
+
+| server | calls in one round |
+|---|---|
+| nimony, `Room` | **3,558 `io_uring_enter`** (~461 deliveries each) |
+| Bun `Bun.serve` | 49,765 `sendto` (~33 each) |
+| wtx | 1,638,464 `writev` (**one per delivery**) |
+
+wtx's writer has no queue and no `flush`: `write_frame` hands the frame's header
+and payload to a vectored write on the socket, so a fan-out to 32 clients is 32
+syscalls, and 1.6 M of them per round is the whole 0.77 s of CPU. At one client
+process the client itself caps the round at ~2.4 M deliveries/s, which is why
+the three servers look close there; with four client processes the server
+capacity is what the number shows.
+
+That is a property of the crate's API, not of the benchmark harness: the only
+way to batch with wtx as it ships is to hand it a `Stream` implementation that
+buffers, and it gives such an adapter no point at which to flush. The
+[room section above](#the-room-publishsubscribe-in-stdwebsocket) is what
+nimony's own `Room` does instead — one frame encoded per publish, appended to
+each member's buffer, one `io_uring_enter` per ~461 of them.
+
+It holds connections at the same cost as the others: `scripts/run-conns.sh 8192
+./bin/wtx-echo` opens 8192, echoes 8192 and holds **8192/8192 at 11.8 KB of
+server RSS each**, 0.06 idle cores (three runs, the same number every time).
+The same script against `./bin/echoserver` from this tree reads 9.1 KB in
+nimony and 1.7 KB for `Bun.serve`.
+
 
 ## Scalability: many connections
 
@@ -579,18 +633,23 @@ and the counts drift until a round never completes.
 
 ```
 src/chatserver.nim          the chat room on std/httpserver + std/websocket
+src/echoserver.nim          the plain echo, same library
 src/bench-client.mjs        round-based client (Bun's workload, timed)
 scripts/build.sh            build bin/chatserver with bin/nimony
+scripts/build-rust.sh       build bin/wtx-chat and bin/wtx-echo with cargo
 scripts/bench.sh            one configuration: server + N client processes
 scripts/summarize.py        median round time, aggregate rate, server CPU
 scripts/run-all.sh          every configuration, one after another
 scripts/run-interleaved.sh  the throughput table: A/B alternating, medians
+scripts/run-rust.sh         the same with wtx in the rotation: A/B/C
+scripts/count-syscalls.sh   strace -c -f around one round of a server
 scripts/run-scale.sh        the scalability sweep: N connections, RTT, rate
 scripts/run-conns.sh        how many connections are held, and RSS per one
 src/scale-client.mjs        the scalability client (max rate or paced)
 src/raw-hold-client.nim     connection holder: hand-written handshake, ~14 KB/conn
 src/hold-client.nim         the same through std/websocket, for comparison
 src/holdserver.nim          accept-and-park server: the floor a connection costs
+rust/wtx-server/            the Rust + wtx servers (echo and chat)
 scripts/fetch-bun-bench.sh  re-vendor oven-sh/bun's bench/websocket-server
 vendor/bun-websocket-server/  Bun's files, unmodified
 results/                    raw logs of the saved run, and the strace counts
@@ -601,8 +660,10 @@ results/                    raw logs of the saved run, and the strace counts
 ```sh
 # a nimony checkout with bin/nimony built (hastur build nimony)
 NIMONY=/path/to/nimony scripts/build.sh
+scripts/build-rust.sh       # the wtx rows; needs cargo >= 1.96
 
 scripts/run-interleaved.sh  # the throughput numbers: Bun and nimony alternating
+scripts/run-rust.sh         # the same with wtx as a third server
 scripts/run-scale.sh        # the scalability sweep (MODE=paced for a fixed rate)
 scripts/run-conns.sh 8192 ./bin/echoserver   # connections held, RSS per connection
 scripts/run-all.sh          # every configuration in one sweep
@@ -613,10 +674,13 @@ One configuration on its own:
 ```sh
 scripts/bench.sh nimony-1x32 1 32 ./bin/chatserver
 scripts/bench.sh bun-1x32    1 32 bun vendor/bun-websocket-server/chat-server.bun.js
+scripts/bench.sh wtx-1x32    1 32 ./bin/wtx-chat
 ```
 
-Requirements: `node` ≥ 22 (for the built-in `WebSocket`), `python3`, and `bun`
-for the Bun rows. The client script is Bun's own and runs on Node unchanged.
+Requirements: `node` ≥ 22 (for the built-in `WebSocket`), `python3`, `bun`
+for the Bun rows, and `cargo` (Rust ≥ 1.96) for the wtx rows — the first build
+needs network for the crates.io index, after which `rust/Cargo.lock` pins the
+tree. The client script is Bun's own and runs on Node unchanged.
 
 ## Caveats
 

@@ -1,0 +1,30 @@
+[package]
+name = "wtx-server"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+# The two servers the benchmark drives, named like the other rows in `bin/`:
+# `wtx-echo` is the counterpart of `bin/echoserver`, `wtx-chat` of
+# `bin/chatserver`.
+[[bin]]
+name = "wtx-echo"
+path = "src/bin/echo.rs"
+
+[[bin]]
+name = "wtx-chat"
+path = "src/bin/chat.rs"
+
+[dependencies]
+tokio = { version = "1", default-features = false, features = ["macros", "net", "rt-multi-thread", "sync", "time"] }
+# The feature set `wtx`'s own web-socket examples use, minus everything they
+# don't need: no TLS certificates (plaintext), no compression, no HTTP/2.
+# `optimizations-std` is what switches on the SIMD/memchr fast paths.
+wtx = { version = "0.52", default-features = false, features = [
+  "crypto-ring",
+  "getrandom",
+  "optimizations-std",
+  "std",
+  "tokio",
+  "web-socket",
+] }

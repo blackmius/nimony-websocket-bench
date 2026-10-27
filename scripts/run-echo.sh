@@ -22,6 +22,10 @@ if [ "$havebun" = yes ]; then
   scripts/bench.sh echo-bun-1x32    1 32 bun src/echo-server.bun.js
   scripts/bench.sh echo-bun-4x8     4  8 bun src/echo-server.bun.js
 fi
+if [ -x bin/wtx-echo ]; then
+  scripts/bench.sh echo-wtx-1x32    1 32 ./bin/wtx-echo
+  scripts/bench.sh echo-wtx-4x8     4  8 ./bin/wtx-echo
+fi
 scripts/bench.sh echo-nimony-1x32 1 32 ./bin/echoserver
 scripts/bench.sh echo-nimony-4x8  4  8 ./bin/echoserver
 
@@ -29,6 +33,9 @@ scripts/bench.sh echo-nimony-4x8  4  8 ./bin/echoserver
 # with the per-message part spread over 133 times more bytes.
 if [ "$havebun" = yes ]; then
   MSG_SIZE=2000 scripts/bench.sh echo-bun-big-1x32 1 32 bun src/echo-server.bun.js
+fi
+if [ -x bin/wtx-echo ]; then
+  MSG_SIZE=2000 scripts/bench.sh echo-wtx-big-1x32 1 32 ./bin/wtx-echo
 fi
 MSG_SIZE=2000 scripts/bench.sh echo-nimony-big-1x32 1 32 ./bin/echoserver
 

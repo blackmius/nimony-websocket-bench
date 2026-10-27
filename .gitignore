@@ -1,3 +1,4 @@
 nimcache/
 bin/*
 results/scale/**/*.rtt
+rust/target/

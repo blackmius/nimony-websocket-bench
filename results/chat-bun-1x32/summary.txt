@@ -1,0 +1,1 @@
+chat-bun-1x32          1 client proc(s)  round=  654.2 ms  aggregate=  2469832 msg/s  server_cpu=  1.07s  alive=yes

@@ -1,0 +1,11 @@
+[workspace]
+members = ["wtx-server"]
+resolver = "3"
+
+# The other servers in this benchmark are built with `-d:release` (Nim) or are
+# shipped prebuilt (Bun), so Rust gets its normal release profile and nothing
+# exotic: no `target-cpu=native`, which the wtx docs suggest for the
+# compression path we don't use.
+[profile.release]
+lto = "thin"
+codegen-units = 1
