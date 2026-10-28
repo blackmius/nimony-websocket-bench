@@ -38,7 +38,7 @@ for cfg in "${configs[@]}"; do
   read -r workload nper per rounds <<< "$cfg"
   case "$workload" in
     chat)    size=chat;     cmdBun="bun vendor/bun-websocket-server/chat-server.bun.js"
-                             cmdNimony="./bin/chatserver"; cmdWtx="./bin/wtx-chat"; envs="";;
+                             cmdNimony="./bin/chatserver-conn"; cmdWtx="./bin/wtx-chat"; envs="";;
     echo)    size=echo;     cmdBun="bun src/echo-server.bun.js"
                              cmdNimony="./bin/echoserver"; cmdWtx="./bin/wtx-echo"
                              envs="READY=0 TOTAL_CLIENTS_OVERRIDE=1";;

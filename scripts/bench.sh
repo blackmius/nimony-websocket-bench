@@ -4,7 +4,7 @@
 #   scripts/bench.sh <tag> <nprocs> <clients-per-proc> <server-cmd...>
 #
 #   scripts/bench.sh bun-1x32    1 32 bun vendor/bun-websocket-server/chat-server.bun.js
-#   scripts/bench.sh nimony-1x32 1 32 ./bin/chatserver
+#   scripts/bench.sh nimony-1x32 1 32 ./bin/chatserver-conn
 #
 # Relative paths in <server-cmd> are resolved from the repository root.
 # TOTAL_CLIENTS_OVERRIDE and READY are passed to the client: an echo server

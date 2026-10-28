@@ -1,35 +1,34 @@
-# std/websocket: a `Room` for fan-out, one flush per frame, and a runtime that holds 8k connections
+# std/websocket: one flush per frame, and a runtime that holds thousands of connections
 
 ## Summary
 
-A chat-room server written on `std/websocket` — the workload of Bun's
-[`bench/websocket-server`](https://github.com/oven-sh/bun/tree/main/bench/websocket-server)
-— is now **within 8% of Bun on every row and ahead on three of the five**, on a
-4-core aarch64 box, measured interleaved against Bun on the same machine:
+The write path of `std/websocket` and the runtime underneath it, measured on
+Bun's echo workload — 32 clients, every message echoed back to its sender — on
+a 4-core aarch64 box, interleaved against Bun on the same machine:
 
 | | nimony | Bun 1.4.4 | |
 |---|---|---|---|
-| chat, 1 client process | 2,471,337 deliveries/s | 2,530,469 | −2.3% |
-| chat, 4 client processes | **7,976,888** | 7,670,167 | +4.0% |
-| plain echo, 1 client process | **307,849** msg/s | 294,511 | +4.5% |
-| plain echo, 4 client processes | **1,011,558** msg/s | 1,096,155 | −7.7% |
-| plain echo, 2000-byte messages | **152,563** msg/s | 144,004 | +5.9% |
+| plain echo, 1 client process | **304,887** msg/s | 275,300 | +10.7% |
+| plain echo, 4 client processes | 1,052,192 msg/s | **1,147,206** | −8.3% |
+| plain echo, 2000-byte messages | **163,438** msg/s | 145,812 | +12.1% |
+| 8192 connections held idle | **9.0 KB** server RSS each | 1.7 KB | |
+| 2048 connections ping-ponging | 284,375 msg/s | **351,252** | 81% |
 
-A third implementation of the same workloads — Rust on the `wtx` crate — is in
-the same benchmark for scale, and it says what is left: it is level on the echo
-and **4.5× behind on the fan-out**, because it writes a delivered frame per
-syscall (1.6 M `writev` per round) where the room puts ~461 deliveries in one
-`io_uring_enter`. See [Where wtx (Rust) sits](#where-wtx-rust-sits).
+Two rows are ahead, one is behind, and the one that is behind is the noisiest
+row on this box (it has read from −8.3% to +4.0% between sessions): with four
+client processes the client, not the server, is the limit, so what it measures
+is latency, and the trampoline below trades a little of it for the rest. The
+many-connection rows are 74–82% of Bun's: that is the syscall batching Bun gets
+from one event loop, and the reason `IORING_OP_RECV_MULTISHOT` is a follow-up
+rather than a claim.
 
-The write path and the fan-out are most of the way there, but not all of it.
-Three separate things were in the way:
+Three things were in the way:
 
-1. **The write path and the fan-out.** `sendFrame` wrote the header and the
-   payload with two `write` + `flush` pairs; every frame cost two heap
-   allocations; there was no way to write a run of frames with one syscall and
-   no publish/subscribe at all, so an application had to fan out through one
-   channel per connection. The MR fixes all four and adds the primitives they
-   need (`Writer.grow`, a non-parking channel receive, and `Room`).
+1. **The write path.** `sendFrame` wrote the header and the payload with two
+   `write` + `flush` pairs, and every frame cost two heap allocations. The
+   frame is now spelled in place in the stream's buffer and flushed once; a
+   run of frames can be buffered (`send(flush = false)`) and handed to the
+   kernel with one syscall.
 2. **The runtime's queues.** The pool took a `SysLock` per queued task and per
    submitted I/O op; the scheduler was **52% of the echo server's CPU**. A
    lane's deferred ops are a plain `LocalRing` now — the producer and the
@@ -47,8 +46,7 @@ Three separate things were in the way:
    flood**, and a profile named why: 16 chain re-submissions per message and a
    hash-table delete per operation. Both are gone (+10% at 512 connections),
    and the per-connection memory that made a big connection count impossible
-   came down from 12.0 KB to **9.1 KB** — four causes, none of them in the
-   WebSocket layer.
+   came down from 12.0 KB to **9.0 KB**.
 
 Everything is additive: existing call sites keep their exact behaviour, and the
 wire bytes are unchanged (`tests/nimony/websocket/tframe.nim` checks them
@@ -56,100 +54,65 @@ against the RFC's own spelling).
 
 ## Numbers
 
-Workload: 32 clients, each sends 1600 messages, every message is echoed to all
-32 clients. One round is 51,200 publishes and 1,638,400 frame deliveries.
-`nimony c -d:release`, 4-core aarch64. The box is shared and drifts by ~10%
-between runs, so Bun and nimony are measured **interleaved** (Bun, nimony, Bun,
-nimony), 10 rounds per configuration, 3 repetitions each, medians reported; a
-3% difference is not a result.
+Workload: 32 clients, each sends 1600 messages, every message echoed back to
+its sender — 51,200 messages and 51,200 deliveries per round. `nimony c
+-d:release`, 4-core aarch64. The box is shared and drifts by ~10% between runs,
+so Bun and nimony are measured **interleaved** (Bun, nimony, Bun, nimony), 20
+rounds per configuration, 3 repetitions each, medians reported; a 3% difference
+is not a result.
 
-Chat — the fan-out workload, one round is 51,200 publishes:
-
-| | before this MR | after | Bun 1.4.4 |
-|---|---|---|---|
-| deliveries/s, 1 client process | 927,248 | **2,471,337** | 2,530,469 |
-| deliveries/s, 4 client processes | 824,417 | **7,976,888** | 7,670,167 |
-| server CPU per round, 1 process | 4.75 s | 0.179 s | 0.100 s |
-| server CPU per round, 4 processes | — | 0.100 s | 0.106 s |
-| `io_uring_enter` per round | 1,478,997 | **3,558** | 49,765 `sendto` |
-
-Plain echo — no fan-out at all, 51,200 messages and 51,200 deliveries a round
-(the "before" column is this MR before `TCP_NODELAY`, the one line that moved
-this benchmark):
+Plain echo — the whole write path and nothing else:
 
 | | before | after | Bun 1.4.4 |
 |---|---|---|---|
-| messages/s, 1 client process | 313,275 | **307,849** | 294,511 |
-| messages/s, 4 client processes | 675,817 | 1,011,558 | 1,096,155 |
-| messages/s, 2000-byte messages | — | **152,563** | 144,004 |
+| messages/s, 1 client process | 313,275 | **304,887** | 275,300 |
+| messages/s, 4 client processes | 675,817 | 1,052,192 | **1,147,206** |
+| messages/s, 2000-byte messages | — | **163,438** | 145,812 |
 
-The rows that are behind are the chat at one client process (−2.3%) and the
-echo at four (−7.7%, and the noisiest row on this box: over 5 interleaved pairs
-of its own it reads 1,077,431 against Bun's 1,021,132, +5.5%). Both are the
-ones where the client, not the server, is the limit, so what they measure is
-latency, and the trampoline below trades a little of it for the rest.
+The four-process row was 57% of Bun's until `TCP_NODELAY` was set on accept:
+the kernel held each small write until the previous one was acknowledged, so
+every reply cost an extra round trip — invisible in CPU and in syscall counts,
+visible only as a latency that did not fall with concurrency. One ring op per
+connection fixed it: 676k → 1.03M messages/s. The one-process row pays ~3% for
+the trampoline, and it is the row where the client is the limit.
 
 Scale — N connections held open, each ping-ponging as fast as it can, 8 s per
 run, medians of 2 runs, 4 client processes:
 
 | connections | Bun rate | nimony rate | ratio | Bun p50 | nimony p50 | Bun p99 | nimony p99 |
 |---|---|---|---|---|---|---|---|
-| 32 | 176,866 | 139,962 | 79% | 164 µs | 205 µs | 491 µs | 568 µs |
-| 128 | 368,292 | 277,612 | 75% | 302 µs | 393 µs | 956 µs | 1,484 µs |
-| 512 | 397,547 | 319,694 | 80% | 1,083 µs | **922 µs** | 4,212 µs | 6,576 µs |
-| 2048 | 309,966 | 236,440 | 76% | 6,261 µs | 7,553 µs | 14,592 µs | 22,793 µs |
+| 32 | 181,450 | 143,262 | 79% | 161 µs | 202 µs | 440 µs | 524 µs |
+| 128 | 383,858 | 283,806 | 74% | 301 µs | 395 µs | 761 µs | 1,136 µs |
+| 512 | 444,844 | 365,173 | 82% | 910 µs | **779 µs** | 3,783 µs | 6,063 µs |
+| 2048 | 351,252 | 284,375 | 81% | 5,598 µs | 6,357 µs | 11,444 µs | 18,409 µs |
 
 At a **fixed** offered rate, with the server's capacity never the limit
-(512 connections, one message each per interval):
+(512 connections, one message each per interval, medians of 2):
 
 | offered | server | delivered | p50 | p99 | CPU |
 |---|---|---|---|---|---|
-| 5,120 msg/s | Bun | 5,050 | 3,690 µs | 13,467 µs | 0.07 |
-| 5,120 msg/s | nimony | **5,069** | **2,275 µs** | **10,528 µs** | 0.13 |
-| 51,200 msg/s | Bun | 46,929 | 861 µs | 5,461 µs | 0.30 |
-| 51,200 msg/s | nimony | **48,639** | **834 µs** | **3,763 µs** | 0.49 |
+| 5,120 msg/s | Bun | 5,043 | 3,935 µs | **10,860 µs** | 0.085 |
+| 5,120 msg/s | nimony | **5,069** | **3,595 µs** | 11,511 µs | 0.16 |
+| 51,200 msg/s | Bun | 46,300 | **909 µs** | 5,812 µs | 0.33 |
+| 51,200 msg/s | nimony | **48,619** | 935 µs | **4,906 µs** | 0.52 |
 
-Holding connections — 8192 connections, one echo each, then idle:
+Holding connections — 8192 connections, one echo each, then idle; the RSS is
+the difference before and after the connections, the idle CPU is measured over
+5 s once they are all up and quiet:
 
 | server | held | server RSS per connection | idle CPU |
 |---|---|---|---|
-| Bun `Bun.serve` | 8192 / 8192 | **1.7 KB** | 0.04 cores |
-| nimony, before this MR | 8192 / 8192 | 12.0 KB | 0.05 cores |
-| nimony, after | 8192 / 8192 | **9.1 KB** | 0.06 cores |
+| Bun `Bun.serve` | 8192 / 8192 | **1.7 KB** | 0.002 cores |
+| nimony | 8192 / 8192 | **9.0 KB** | 0.060 cores |
 
-The syscall count is the clearest single number for the fan-out: **~0.9
-`io_uring_enter` per delivered frame before, ~36 frames per call after, ~461
-with the room** — the ring already batches up to 128 queued ops per `poll`, and
-the only reason it never had more than one was that the writer waited for each
-write to complete.
-
-## Where wtx (Rust) sits
-
-A third implementation of the same two workloads rides along, to say what the
-remaining gap is made of: `rust/wtx-server` in `nimony-websocket-bench`, the
-low-level API of wtx 0.52 (`WebSocketAcceptor`, one tokio task per connection),
-echo and chat. Measured in rotation with the other two — Bun, nimony, wtx /
-nimony, wtx, Bun / wtx, Bun, nimony — medians of 3:
-
-| | Bun | nimony | wtx |
-|---|---|---|---|
-| chat, 1 client process | **2,488,162** | 2,403,859 | 2,247,476 |
-| chat, 4 client processes | 7,968,171 | **8,112,098** | 1,767,378 |
-| echo, 1 client process | 275,387 | 278,878 | **287,897** |
-| echo, 4 client processes | 1,039,793 | **1,132,036** | 1,073,080 |
-| echo, 2000-byte messages | 139,667 | **152,890** | 137,794 |
-
-One session, so the absolute numbers differ from the tables above by the box's
-drift (the echo rows by ±10% between sessions); the three columns are what
-compare. The echo is level — three implementations of one protocol. The fan-out
-is not, and the syscall count says why: wtx's `write_frame` has no queue and no
-`flush`, so it is one `writev` per delivered frame, **1,638,464 per round**
-against the room's 3,558 `io_uring_enter` and Bun's 49,765 `sendto`, and 0.77 s
-of server CPU against 0.21 and 0.10. Batching a turn's writes is exactly what
-this MR's write path does and what the crate's public writer does not expose.
-
-The same holds for idle connections: 8192/8192 held at **11.8 KB** of server
-RSS each and 0.06 cores, against the 9.1 KB above and Bun's 1.7.
+nimony's 0.06 cores is the pool's periodic wakeup — a lane polls every 1 ms,
+and an idle connection costs nothing on top of it. Before this MR the same
+measurement read 12.0 KB per connection; what is left is the `HttpConnection`
+itself (848 bytes of it), the WebSocket state of an upgraded connection, the
+writer's outbox once it has written something, and the echo chain parked on its
+next read. A 32,768-connection run stops at 28,228 held for *both* servers —
+the loopback ephemeral port range, not either server — and at 9.0 KB each that
+is ~250 MB of server memory.
 
 ## What changed
 
@@ -174,44 +137,6 @@ RSS each and 0.06 cores, against the 9.1 KB above and Bun's 1.7.
   frames are still coming, the replies ride along with the next write; that is
   what lets an echo server answer a burst with one write instead of one per
   message, and it halved its CPU.
-* **`Room`** — publish/subscribe, and the only place in the module that writes
-  to more than one connection. The connection joins it, so the handler stays on
-  the pair API:
-
-  ```nim
-  var ws = upgradeWebSocket(c)
-  ws.subscribe("chat")                       # the room owns the writer now
-  ...
-  ws.publish("chat", msg)                    # one channel send
-  ```
-
-  `subscribe` moves the writer into the room; from then on `ws.send`, `ws.recv`
-  and `ws.close` go through it, so pings are answered and the peer's close is
-  echoed by whatever owns the writer. The room writes into every member's
-  buffer with `flush = false` and flushes each member once per turn, so a
-  publish is one channel send and one buffer append per member — not a task per
-  delivery. `subscribe`/`publish` use the process-wide `defaultRoom()` when not
-  given one (topics are then just names, as in Bun); `newRoom` gives a server
-  isolated rooms, and `Room.publish` is the server-initiated form. `publish`
-  parks when the room's queue is full: that is the backpressure, and it is per
-  room rather than per member.
-
-  Topics are **paths**, as in uWebSockets — `"chat"`, `"chat/room1"`,
-  `"chat/room1/users"` — and a publish reaches the topic *and everything below
-  it*. The room keeps a tree of segments instead of a list of members to scan,
-  so a publish walks the path once and then the subscribers hanging off the
-  node it lands on; a member that is in both a topic and one of its parents is
-  reached once, by a per-publish generation. That is where most of the room's
-  win came from even with a single topic: the flat version compared the
-  published topic against every member's topic string on every delivery
-  (1.6 M string compares per round), the tree compares segments once per
-  publish and an integer per delivery. A server masks nothing, so the frame a
-  publish produces is the same bytes for every member: it is spelled once per
-  publish and appended, not encoded again for each of the 32. Round time 790 ms → 611 ms at one client
-  process, 458 ms → 254 ms at four. The text is checked as UTF-8 once per
-  publish rather than once per member, and the topic of the last publish is
-  remembered so a repeated topic is one string compare rather than a walk.
-
 ### `lib/std/streamio.nim`
 
 * `grow(w, n): var openArray[char]` — `n` bytes appended to the writer's
@@ -270,18 +195,16 @@ tree, interleaved, medians of 3:
 
 | workload | with both | this MR | |
 |---|---|---|---|
-| chat, 1 client process | 2,452,195 | 2,434,654 | −0.7% |
-| chat, 4 client processes | 8,394,646 | 8,418,868 | +0.3% |
 | echo, 1 client process | 299,331 | 289,572 | −3.3% |
 | echo, 4 client processes | 1,031,886 | 990,672 | −4.0% |
 | 512 connections, `MODE=max` | 294,988 | 293,189 | −0.6% |
 
 All inside the ±5–8% spread of the box, and the counters explain it: over a
 512-connection round the deques' shared FIFO is never used (`fifoOwn` /
-`fifoStolen` = 0) and only ~3% of batches come from another worker's deque
-(0.4% in the chat), because `flushStaged` already hands the owner 32 tasks per
-lock; the gate's claimed ~7% on the one-process echo does not reproduce either
-(−0.9%). Both were removed — that is ~110 lines this MR no longer has.
+`fifoStolen` = 0) and only ~3% of batches come from another worker's deque,
+because `flushStaged` already hands the owner 32 tasks per lock; the gate's
+claimed ~7% on the one-process echo does not reproduce either (−0.9%). Both
+were removed — that is ~110 lines this MR no longer has.
 
 ### `lib/std/ioring/core/slots.nim`: the fd is not a hash key
 
@@ -301,7 +224,7 @@ connection therefore carried a DEFLATE histogram for a compressor that is off by
 default. The histograms moved to the heap, allocated once per *compressing*
 stream: `sizeof(HttpConnection)` **3320 → 824 bytes**. With the read step above,
 and with `std/socket` allocating its 8 KB + 8 KB buffers lazily instead of in
-`initSocket`, a held connection went from **12.0 KB to 9.1 KB** of server RSS.
+`initSocket`, a held connection went from **12.0 KB to 9.0 KB** of server RSS.
 
 What is left is the connection itself: 848 bytes of `HttpConnection`, the
 WebSocket state of a connection that has upgraded, the writer's outbox once it
@@ -424,37 +347,34 @@ and measured out with the deques (above).
 * `tests/nimony/websocket/tserver.nim` — 31 cases over a real socket: the
   handshake, the three length forms, fragments, pings, and the protocol
   violations a server has to refuse.
-* A plain echo server (`src/echoserver.nim`, no room at all) is the per-message
-  rows in Numbers above: the +4.5% at one client process is the protocol and the
-  write path, the −7.7% at four is the trampoline (see `threadpool.nim`), and
-  the 2000-byte row is +5.9%.
+* A plain echo server (`src/echoserver.nim`, no fan-out at all) is the per-message
+  rows in Numbers above: the +10.7% at one client process is the protocol and
+  the write path, the −8.3% at four is the trampoline (see `threadpool.nim`),
+  and the 2000-byte row is +12.1%.
 * `scripts/run-scale.sh` holds 32…2048 connections open, each ping-ponging:
-  every connection is accepted (2048/2048, no errors) at 75–81% of Bun's
-  aggregate rate, with a comparable or better median RTT at 512 connections and
-  a p99 ~1.6× worse. At a fixed offered rate nimony delivers more, at a lower
-  median and a lower p99 — the tables are in Numbers.
+  every connection is accepted (2048/2048, no errors) at 74–82% of Bun's
+  aggregate rate, with a better median RTT at 512 connections and a p99
+  1.2–1.6× worse (it grows with the connection count). At a fixed offered rate
+  nimony delivers more, with a lower p99 at the high rate and a better median
+  at the low one — the tables are in Numbers.
 * `scripts/run-conns.sh` holds 8192 connections open and idle after one echo
-  each: both servers keep every one of them, nimony at 9.1 KB of server RSS per
-  connection against Bun's 1.7 KB, and idle CPU is flat in the connection count
-  (0.06 cores against Bun's 0.04). A 32,768 connection run stops at 28,228 held
-  for *both* servers — the loopback ephemeral port range, not either server —
-  and at 9.1 KB each that is ~250 MB of server memory.
+  each: both servers keep every one of them, nimony at 9.0 KB of server RSS per
+  connection against Bun's 1.7 KB, and idle CPU is the pool's 1 ms poll, flat in
+  the connection count (0.060 cores against Bun's 0.002). A 32,768 connection
+  run stops at 28,228 held for *both* servers — the loopback ephemeral port
+  range, not either server — and at 9.0 KB each that is ~250 MB of server
+  memory.
 * `tests/nimony/stdlib/tgzip.nim` and `tests/nimony/http/tcompress.nim` cover
   the `Deflater` whose histograms moved to the heap.
-* `tests/nimony/websocket/troom.nim` (new) — a room over a real socket:
-  `ws.publish` reaches every member including the sender, `ws.send` reaches one
-  connection only, a publish to a parent topic reaches the topics below it and
-  a member in both gets the line once, a publish to a child reaches only its
-  subtree, a member leaving does not take the room with it, and the room
-  answers the peer's close.
 * `tests/nimony/http` (15/15), `tests/nimony/streams` (4/4) — `streamio` and
   `channels` are under both.
 * `tests/nimony/stdlib/tall.nim` — every module in `lib/std` still compiles
   together.
 
-The benchmark, its harness and the raw logs (including the `strace -c` counts)
-are in a separate repository, `nimony-websocket-bench`: `scripts/run-all.sh`
-reproduces the tables, `scripts/run-rust.sh` the one with wtx in the rotation.
+The benchmark, its harness and the raw logs are in a separate repository,
+`nimony-websocket-bench`: `scripts/run-interleaved.sh` reproduces the echo
+table, `scripts/run-scale.sh` the scale one, `scripts/run-conns.sh` the held
+connections, and `scripts/run-all.sh` the lot.
 
 ## Compatibility
 
@@ -472,16 +392,12 @@ reproduces the tables, `scripts/run-rust.sh` the one with wtx in the rotation.
   Only the *first* block changes: growth after it is geometric as before, so
   an append-heavy caller does at most one extra reallocation.
 * New API only: `Writer.grow`, `Reader.tryReadRecord`, `Receiver.tryRecv`,
-  `WebSocketReader.buffered`, `WebSocketWriter.flush`, `WebSocket.flush`, the
-  `flush` parameter on `send`,
-  and `Room` with `newRoom`, `defaultRoom`, `Room.publish`, `Room.addTopic`,
-  `Room.dropTopic`, plus `WebSocket.subscribe`, `WebSocket.unsubscribe` and
-  `WebSocket.publish`. A connection that never subscribes behaves exactly as
-  before.
+  `WebSocketReader.buffered`, `WebSocketWriter.flush`, `WebSocket.flush` and
+  the `flush` parameter on `send`.
 
 ## Follow-ups (not in this MR)
 
-* **What is left of the 9.1 KB per connection.** The 16 KB read reservation is
+* **What is left of the 9.0 KB per connection.** The 16 KB read reservation is
   gone (1 KB now, growing only while a peer fills it), and what remains is the
   `HttpConnection` itself (848 bytes of it), the WebSocket state of an upgraded
   connection, the writer's outbox once it has written something, and the echo
@@ -490,34 +406,12 @@ reproduces the tables, `scripts/run-rust.sh` the one with wtx in the rotation.
   pool (they are allocated and freed in the same lane), shrink the frames (the
   echo frame holds a whole `WebSocket` by value), and the allocator's page
   granularity — a 2 KB chunk still touches a 4 KB page.
-* **The p99 in the many-connection case** is ~1.6× Bun's while the median is
+* **The p99 in the many-connection case** is 1.2–1.6× Bun's while the median is
   better. A worker cannot poll its own lane while it runs a continuation, so a
   long chain delays every completion on that lane; that is why a bigger
   `trampolineSteps` is not automatically better, and why the gate that used to
   bound it was measured out rather than kept — it bought nothing on the
   throughput rows and the p99 is still there.
-* The room's turn ends by flushing its members one after another, and each
-  flush waits for its own write, so those waits are sequential. Overlapping
-  them — submit the turn's writes, wait once — needs "submit without waiting"
-  plus "wait for the drain". The deferred-submit variant measured above is
-  exactly the first half, and it lost because it dropped the second; with the
-  wait kept, a turn's flushes would overlap instead of serialising.
-* `publish` walks the topic path with a `substr` per segment. Fine for
-  chat-shaped topics, wasteful for a hot loop over deep paths; caching the node
-  in the subscription would do.
-* A client that disconnects still kills a server that does not install
-  `SIG_IGN` for `SIGPIPE`: the runtime has no handler and the write path does
-  not pass `MSG_NOSIGNAL` (the flag is defined in `lib/std/posix/io_uring.nim`
-  and unused). Worth fixing in the runtime rather than in every server.
-* The room's turn ends by flushing its members one after another, and each
-  flush waits for its own write, so those waits are sequential. Overlapping
-  them — submit the turn's writes, wait once — needs "submit without waiting"
-  plus "wait for the drain". The deferred-submit variant measured above is
-  exactly the first half, and it lost because it dropped the second; with the
-  wait kept, a turn's flushes would overlap instead of serialising.
-* `publish` walks the topic path with a `substr` per segment. Fine for
-  chat-shaped topics, wasteful for a hot loop over deep paths; caching the node
-  in the subscription would do.
 * A client that disconnects still kills a server that does not install
   `SIG_IGN` for `SIGPIPE`: the runtime has no handler and the write path does
   not pass `MSG_NOSIGNAL` (the flag is defined in `lib/std/posix/io_uring.nim`

@@ -28,7 +28,7 @@ declare -A AGG CPU RND
 for cfg in "${configs[@]}"; do
   read -r ta tb nper per rounds kind <<< "$cfg"
   case "$kind" in
-    chat)    ca="bun vendor/bun-websocket-server/chat-server.bun.js"; cb="./bin/chatserver"; envs="";;
+    chat)    ca="bun vendor/bun-websocket-server/chat-server.bun.js"; cb="./bin/chatserver-conn"; envs="";;
     echo)    ca="bun src/echo-server.bun.js"; cb="./bin/echoserver"; envs="READY=0 TOTAL_CLIENTS_OVERRIDE=1";;
     echobig) ca="bun src/echo-server.bun.js"; cb="./bin/echoserver"; envs="READY=0 TOTAL_CLIENTS_OVERRIDE=1 MSG_SIZE=2000";;
   esac
