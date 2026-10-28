@@ -8,19 +8,21 @@ a 4-core aarch64 box, interleaved against Bun on the same machine:
 
 | | nimony | Bun 1.4.4 | |
 |---|---|---|---|
-| plain echo, 1 client process | **304,887** msg/s | 275,300 | +10.7% |
-| plain echo, 4 client processes | 1,052,192 msg/s | **1,147,206** | −8.3% |
-| plain echo, 2000-byte messages | **163,438** msg/s | 145,812 | +12.1% |
+| plain echo, 1 client process | 277,768 msg/s | **281,306** | −1.3% |
+| plain echo, 4 client processes | **1,078,218** msg/s | 974,504 | +10.6% |
+| plain echo, 2000-byte messages | **147,089** msg/s | 136,070 | +8.1% |
 | 8192 connections held idle | **9.0 KB** server RSS each | 1.7 KB | |
-| 2048 connections ping-ponging | 284,375 msg/s | **351,252** | 81% |
+| 2048 connections ping-ponging | 241,874 msg/s | **282,010** | 86% |
 
-Two rows are ahead, one is behind, and the one that is behind is the noisiest
-row on this box (it has read from −8.3% to +4.0% between sessions): with four
-client processes the client, not the server, is the limit, so what it measures
-is latency, and the trampoline below trades a little of it for the rest. The
-many-connection rows are 74–82% of Bun's: that is the syscall batching Bun gets
-from one event loop, and the reason `IORING_OP_RECV_MULTISHOT` is a follow-up
-rather than a claim.
+The two per-message rows are the noisiest on this box and they swap places
+between sessions — across the interleaved sessions the one-process row has
+read −1.3…+10.7% against Bun and the four-process row −8.3…+10.6%, because
+there the client, not the server, is the limit, and the trampoline below
+trades a little latency for the rest. The 2000-byte row is consistently ahead
+(+8…+12%), and so are two of the connection counts: the many-connection rows
+are 75–92% of Bun's, which is the syscall batching Bun gets from one event
+loop and the reason `IORING_OP_RECV_MULTISHOT` is a follow-up rather than a
+claim.
 
 Three things were in the way:
 
@@ -65,9 +67,9 @@ Plain echo — the whole write path and nothing else:
 
 | | before | after | Bun 1.4.4 |
 |---|---|---|---|
-| messages/s, 1 client process | 313,275 | **304,887** | 275,300 |
-| messages/s, 4 client processes | 675,817 | 1,052,192 | **1,147,206** |
-| messages/s, 2000-byte messages | — | **163,438** | 145,812 |
+| messages/s, 1 client process | 313,275 | 277,768 | **281,306** |
+| messages/s, 4 client processes | 675,817 | **1,078,218** | 974,504 |
+| messages/s, 2000-byte messages | — | **147,089** | 136,070 |
 
 The four-process row was 57% of Bun's until `TCP_NODELAY` was set on accept:
 the kernel held each small write until the previous one was acknowledged, so
@@ -81,20 +83,20 @@ run, medians of 2 runs, 4 client processes:
 
 | connections | Bun rate | nimony rate | ratio | Bun p50 | nimony p50 | Bun p99 | nimony p99 |
 |---|---|---|---|---|---|---|---|
-| 32 | 181,450 | 143,262 | 79% | 161 µs | 202 µs | 440 µs | 524 µs |
-| 128 | 383,858 | 283,806 | 74% | 301 µs | 395 µs | 761 µs | 1,136 µs |
-| 512 | 444,844 | 365,173 | 82% | 910 µs | **779 µs** | 3,783 µs | 6,063 µs |
-| 2048 | 351,252 | 284,375 | 81% | 5,598 µs | 6,357 µs | 11,444 µs | 18,409 µs |
+| 32 | 163,811 | 128,395 | 78% | 171 µs | 214 µs | 515 µs | 665 µs |
+| 128 | 371,229 | 278,914 | 75% | 300 µs | 399 µs | 813 µs | 1,230 µs |
+| 512 | 380,491 | 349,928 | **92%** | 1,197 µs | **820 µs** | 3,953 µs | 6,249 µs |
+| 2048 | 282,010 | 241,874 | 86% | 6,793 µs | 7,332 µs | 15,482 µs | 21,973 µs |
 
 At a **fixed** offered rate, with the server's capacity never the limit
 (512 connections, one message each per interval, medians of 2):
 
 | offered | server | delivered | p50 | p99 | CPU |
 |---|---|---|---|---|---|
-| 5,120 msg/s | Bun | 5,043 | 3,935 µs | **10,860 µs** | 0.085 |
-| 5,120 msg/s | nimony | **5,069** | **3,595 µs** | 11,511 µs | 0.16 |
-| 51,200 msg/s | Bun | 46,300 | **909 µs** | 5,812 µs | 0.33 |
-| 51,200 msg/s | nimony | **48,619** | 935 µs | **4,906 µs** | 0.52 |
+| 5,120 msg/s | Bun | 5,018 | 4,224 µs | **12,730 µs** | 0.09 |
+| 5,120 msg/s | nimony | **5,069** | **3,596 µs** | 13,561 µs | 0.17 |
+| 51,200 msg/s | Bun | 45,788 | 960 µs | 6,062 µs | 0.33 |
+| 51,200 msg/s | nimony | **48,790** | **929 µs** | **4,744 µs** | 0.54 |
 
 Holding connections — 8192 connections, one echo each, then idle; the RSS is
 the difference before and after the connections, the idle CPU is measured over
@@ -103,9 +105,9 @@ the difference before and after the connections, the idle CPU is measured over
 | server | held | server RSS per connection | idle CPU |
 |---|---|---|---|
 | Bun `Bun.serve` | 8192 / 8192 | **1.7 KB** | 0.002 cores |
-| nimony | 8192 / 8192 | **9.0 KB** | 0.060 cores |
+| nimony | 8192 / 8192 | **9.0 KB** | 0.066 cores |
 
-nimony's 0.06 cores is the pool's periodic wakeup — a lane polls every 1 ms,
+nimony's 0.066 cores is the pool's periodic wakeup — a lane polls every 1 ms,
 and an idle connection costs nothing on top of it. Before this MR the same
 measurement read 12.0 KB per connection; what is left is the `HttpConnection`
 itself (848 bytes of it), the WebSocket state of an upgraded connection, the
@@ -348,19 +350,19 @@ and measured out with the deques (above).
   handshake, the three length forms, fragments, pings, and the protocol
   violations a server has to refuse.
 * A plain echo server (`src/echoserver.nim`, no fan-out at all) is the per-message
-  rows in Numbers above: the +10.7% at one client process is the protocol and
-  the write path, the −8.3% at four is the trampoline (see `threadpool.nim`),
-  and the 2000-byte row is +12.1%.
+  rows in Numbers above: the −1.3% at one client process is the trampoline
+  (see `threadpool.nim`), the +10.6% at four is the write path once the client
+  can keep up, and the 2000-byte row is +8.1%.
 * `scripts/run-scale.sh` holds 32…2048 connections open, each ping-ponging:
-  every connection is accepted (2048/2048, no errors) at 74–82% of Bun's
+  every connection is accepted (2048/2048, no errors) at 75–92% of Bun's
   aggregate rate, with a better median RTT at 512 connections and a p99
-  1.2–1.6× worse (it grows with the connection count). At a fixed offered rate
+  1.3–1.6× worse (it grows with the connection count). At a fixed offered rate
   nimony delivers more, with a lower p99 at the high rate and a better median
   at the low one — the tables are in Numbers.
 * `scripts/run-conns.sh` holds 8192 connections open and idle after one echo
   each: both servers keep every one of them, nimony at 9.0 KB of server RSS per
   connection against Bun's 1.7 KB, and idle CPU is the pool's 1 ms poll, flat in
-  the connection count (0.060 cores against Bun's 0.002). A 32,768 connection
+  the connection count (0.066 cores against Bun's 0.002). A 32,768 connection
   run stops at 28,228 held for *both* servers — the loopback ephemeral port
   range, not either server — and at 9.0 KB each that is ~250 MB of server
   memory.
@@ -406,7 +408,7 @@ connections, and `scripts/run-all.sh` the lot.
   pool (they are allocated and freed in the same lane), shrink the frames (the
   echo frame holds a whole `WebSocket` by value), and the allocator's page
   granularity — a 2 KB chunk still touches a 4 KB page.
-* **The p99 in the many-connection case** is 1.2–1.6× Bun's while the median is
+* **The p99 in the many-connection case** is 1.3–1.6× Bun's while the median is
   better. A worker cannot poll its own lane while it runs a continuation, so a
   long chain delays every completion on that lane; that is why a bigger
   `trampolineSteps` is not automatically better, and why the gate that used to

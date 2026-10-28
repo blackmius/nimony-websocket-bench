@@ -10,11 +10,11 @@ echo workload — 32 clients, every message echoed back to its sender, one round
 
 | | before | after | Bun 1.4.4 |
 |---|---|---|---|
-| echo, 1 client process | 313,275 msg/s | **304,887** | 275,300 |
-| echo, 4 client processes | 675,817 | 1,052,192 | **1,147,206** |
-| echo, 2000-byte messages | — | **163,438** | 145,812 |
+| echo, 1 client process | 313,275 msg/s | 277,768 | **281,306** |
+| echo, 4 client processes | 675,817 | **1,078,218** | 974,504 |
+| echo, 2000-byte messages | — | **147,089** | 136,070 |
 | held connection, server RSS | 12.0 KB | **9.0 KB** | 1.7 KB |
-| 512 connections, `MODE=max` | 275,000 msg/s | **365,173** | 444,844 |
+| 512 connections, `MODE=max` | 275,000 msg/s | **349,928** | 380,491 |
 
 Everything was measured on a 4-core aarch64 box, `nimony c -d:release`, Bun
 1.4.4. The box is shared and drifts by ~10% between runs, so Bun and nimony are
@@ -31,12 +31,13 @@ names its script and settings. The harness, the raw logs and the client are in
 
 | | 1 client process | 4 client processes |
 |---|---|---|
-| Bun | 275,300 msg/s | **1,147,206** msg/s |
-| nimony | **304,887** (+10.7%) | 1,052,192 (−8.3%) |
+| Bun | **281,306** msg/s | 974,504 msg/s |
+| nimony | 277,768 (−1.3%) | **1,078,218** (+10.6%) |
 
-2000-byte messages, one client process: **163,438** against Bun's 145,812
-(+12.1%). The 4×8 row is the noisiest on this box (±10% between sessions); it
-is the row where the client, not the server, is the limit.
+2000-byte messages, one client process: **147,089** against Bun's 136,070
+(+8.1%). Both per-message rows are the noisiest on this box (±10% between
+sessions) and they swap places; it is the row where the client, not the
+server, is the limit.
 
 Two measurement-only rows: `TCP_NODELAY` on accept took the 4-process echo from
 **676k to 1.03M** msg/s (p90 at 8 messages in flight 112 → 85 µs), and
@@ -49,14 +50,14 @@ run, medians of 2 runs, 4 client processes:
 
 | connections | Bun rate | nimony rate | ratio | Bun p50 | nimony p50 | Bun p99 | nimony p99 |
 |---|---|---|---|---|---|---|---|
-| 32 | 181,450 | 143,262 | 79% | 161 µs | 202 µs | 440 µs | 524 µs |
-| 128 | 383,858 | 283,806 | 74% | 301 µs | 395 µs | 761 µs | 1,136 µs |
-| 512 | 444,844 | 365,173 | 82% | 910 µs | **779 µs** | 3,783 µs | 6,063 µs |
-| 2048 | 351,252 | 284,375 | 81% | 5,598 µs | 6,357 µs | 11,444 µs | 18,409 µs |
+| 32 | 163,811 | 128,395 | 78% | 171 µs | 214 µs | 515 µs | 665 µs |
+| 128 | 371,229 | 278,914 | 75% | 300 µs | 399 µs | 813 µs | 1,230 µs |
+| 512 | 380,491 | 349,928 | **92%** | 1,197 µs | **820 µs** | 3,953 µs | 6,249 µs |
+| 2048 | 282,010 | 241,874 | 86% | 6,793 µs | 7,332 µs | 15,482 µs | 21,973 µs |
 
 Every connection is held (2048/2048, zero errors) by both servers; nimony spends
 1.4–1.5× Bun's CPU. Its median is better at 512 connections and its tail
-1.2–1.6× worse — a worker cannot poll its own lane while it runs a
+1.3–1.6× worse — a worker cannot poll its own lane while it runs a
 continuation.
 
 At a **fixed** offered rate (`MODE=paced`, 512 connections, one message each per
@@ -64,10 +65,10 @@ interval), where the server's capacity is never the limit:
 
 | offered | server | delivered | p50 | p99 | CPU |
 |---|---|---|---|---|---|
-| 5,120 msg/s | Bun | 5,043 | 3,935 µs | **10,860 µs** | 0.085 |
-| 5,120 msg/s | nimony | **5,069** | **3,595 µs** | 11,511 µs | 0.16 |
-| 51,200 msg/s | Bun | 46,300 | **909 µs** | 5,812 µs | 0.33 |
-| 51,200 msg/s | nimony | **48,619** | 935 µs | **4,906 µs** | 0.52 |
+| 5,120 msg/s | Bun | 5,018 | 4,224 µs | **12,730 µs** | 0.09 |
+| 5,120 msg/s | nimony | **5,069** | **3,596 µs** | 13,561 µs | 0.17 |
+| 51,200 msg/s | Bun | 45,788 | 960 µs | 6,062 µs | 0.33 |
+| 51,200 msg/s | nimony | **48,790** | **929 µs** | **4,744 µs** | 0.54 |
 
 ## Holding connections
 
@@ -78,7 +79,7 @@ idle CPU is measured over 5 s once they are all up and quiet.
 |---|---|---|---|
 | Bun `Bun.serve` | 8192 / 8192 | **1.7 KB** | 0.002 cores |
 | nimony, before this branch | 8192 / 8192 | 12.0 KB | — |
-| nimony, after | 8192 / 8192 | **9.0 KB** | 0.060 cores |
+| nimony, after | 8192 / 8192 | **9.0 KB** | 0.066 cores |
 
 Four causes, found by counting the allocator's live blocks per size class: the
 DEFLATE histograms inline in every `HttpConnection` (3320 → 848 bytes once on

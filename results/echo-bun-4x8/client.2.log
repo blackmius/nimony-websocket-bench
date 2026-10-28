@@ -1,22 +1,22 @@
 8 clients connected, 1600 msgs each, 12800 echoes per round
-round  1:    139.1 ms      92012 msg/s
-round  2:     59.2 ms     216177 msg/s
-round  3:     47.2 ms     271397 msg/s
-round  4:     40.6 ms     315359 msg/s
-round  5:     54.8 ms     233570 msg/s
-round  6:     54.0 ms     236883 msg/s
-round  7:     51.1 ms     250615 msg/s
-round  8:     36.1 ms     354871 msg/s
-round  9:     62.7 ms     204047 msg/s
-round 10:     61.2 ms     209168 msg/s
-round 11:     33.4 ms     382883 msg/s
-round 12:     33.7 ms     379943 msg/s
-round 13:     35.8 ms     357347 msg/s
-round 14:     45.4 ms     282115 msg/s
-round 15:     74.3 ms     172239 msg/s
-round 16:     42.6 ms     300310 msg/s
-round 17:     28.7 ms     446312 msg/s
-round 18:     38.2 ms     335008 msg/s
-round 19:     38.6 ms     331452 msg/s
-round 20:     67.2 ms     190357 msg/s
-{"median":282115,"rates":[92012,172239,190357,204047,209168,216177,233570,236883,250615,271397,282115,300310,315359,331452,335008,354871,357347,379943,382883,446312]}
+round  1:    127.5 ms     100359 msg/s
+round  2:    124.9 ms     102476 msg/s
+round  3:     45.6 ms     280778 msg/s
+round  4:     30.6 ms     418446 msg/s
+round  5:     32.2 ms     397462 msg/s
+round  6:     50.5 ms     253444 msg/s
+round  7:     53.5 ms     239076 msg/s
+round  8:     54.3 ms     235699 msg/s
+round  9:     23.9 ms     534752 msg/s
+round 10:     41.5 ms     308535 msg/s
+round 11:     23.4 ms     546938 msg/s
+round 12:     25.9 ms     494763 msg/s
+round 13:     44.4 ms     288189 msg/s
+round 14:     34.4 ms     372416 msg/s
+round 15:     43.0 ms     297931 msg/s
+round 16:     74.5 ms     171785 msg/s
+round 17:     63.6 ms     201110 msg/s
+round 18:     48.3 ms     265205 msg/s
+round 19:     53.4 ms     239703 msg/s
+round 20:     29.3 ms     436412 msg/s
+{"median":288189,"rates":[100359,102476,171785,201110,235699,239076,239703,253444,265205,280778,288189,297931,308535,372416,397462,418446,436412,494763,534752,546938]}

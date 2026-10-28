@@ -6,14 +6,13 @@ run against a chat server written in Nim on top of nimony's `std/websocket`
 (`src/chatserver-conn.nim`: one writer chain per connection, the shape the
 pair API gives an application), and against Bun's own server, driven by the
 same client on the same machine. The branch is about the write path and the
-runtime underneath; a library-level fan-out is measured on the `topictree`
-branch of this repository.
+runtime underneath.
 
 It started as a measurement and turned into an optimisation of
 `std/websocket`, `std/streamio` and `std/channels`: see
-[What was changed](#what-was-changed). The server went from **927k to ~2.4M
-fan-out messages/s** on this box, and from 1.48 M `io_uring_enter` per round to
-46 k.
+[What was changed](#what-was-changed). The echo is ahead at four client
+processes and level at one, a held connection went from 12.0 KB to 9.0 KB of
+server RSS, and the chat server's four-process row more than doubled.
 
 The Bun files are vendored unmodified in `vendor/bun-websocket-server/`; the
 client that produces the numbers is `src/bench-client.mjs`, which is Bun's
@@ -35,22 +34,21 @@ One round is 32 clients × 1600 messages each, every message fanned out to all
 
 | server | clients | round | deliveries/s | server CPU |
 |---|---|---|---|---|
-| Bun `Bun.serve` | 1 × 32 | 625 ms | **2,596,610** | 0.48 s |
-| nimony, `chatserver-conn` | 1 × 32 | 612 ms | 2,549,665 | 4.70 s |
-| Bun `Bun.serve` | 4 × 8 | 298 ms | **5,200,700** | 4.38 s |
-| nimony, `chatserver-conn` | 4 × 8 | 195 ms | **8,435,536** | 0.91 s |
+| Bun `Bun.serve` | 1 × 32 | 653 ms | 2,481,443 | 1.04 s |
+| nimony, `chatserver-conn` | 1 × 32 | 646 ms | **2,492,823** | 5.65 s |
+| Bun `Bun.serve` | 4 × 8 | 231 ms | **7,394,088** | 1.07 s |
+| nimony, `chatserver-conn` | 4 × 8 | 311 ms | 5,094,972 | 4.67 s |
 
 Reading the table:
 
-* **Level at one client process (−1.8%), ahead at four (+62%)**. The
-  one-process row is client-bound; at four the per-connection writer chains
-  run out of CPU, and nimony's one chain per connection does not.
-* **Bun uses less CPU at one client process (0.48 s against 4.70 s per 10
-  rounds) and 4.9× more at four** (4.38 s against 0.91 s).
+* **Level at one client process (+0.5%), 31% behind at four.** One client
+  process is client-bound; at four the per-connection writer chains cost a
+  task, a wakeup and a syscall per delivery, and Bun's single event loop is
+  cheaper at that fan-out.
+* **Bun uses 5.4× less CPU at one client process (1.04 s against 5.65 s per 10
+  rounds) and 4.4× less at four** (1.07 s against 4.67 s).
 * The chat server here is `src/chatserver-conn.nim`, the one an application
-  writes on the pair API: one writer chain per connection. A fan-out inside
-  the library (a topic tree) was measured on the `topictree` branch of this
-  repository and is not part of this branch.
+  writes on the pair API: one writer chain per connection.
 
 
 ## What was changed
@@ -242,13 +240,9 @@ another connection's socket interleaves two frames — so an application on the
 pair API gives every connection a writer chain of its own and publishes through
 one channel per connection: `src/chatserver-conn.nim`. A message then costs 32
 channel sends, 32 wakeups and a task per delivery, which is the row above: it
-stops scaling at ~2.6 M with one client process and reaches 8.4 M with four,
-where the chains finally run on different cores.
-
-A fan-out inside the library (a topic tree that owns the writers and publishes
-into them) was built and measured as a separate branch: `topictree` in this
-repository. It turns a publish into one queue reservation plus one buffer
-append per member, and the branch's README/MR carry those numbers.
+stops scaling at ~2.5 M with one client process and reaches 5.1 M with four,
+where the chains finally run on different cores — 31% behind Bun, whose one
+event loop does the same fan-out without a task per delivery.
 
 ## Plain echo: no fan-out at all
 
@@ -261,12 +255,12 @@ method as above.
 
 | | round | messages/s | server CPU per round | per message |
 |---|---|---|---|---|
-| Bun `Bun.serve` | 185 ms | 275,300 | 0.125 s | 2.44 µs |
-| nimony `std/websocket` | 162 ms | **304,887** | 0.127 s | 2.48 µs |
-| Bun `Bun.serve` | 48 ms | **1,147,206** | 0.039 s | 0.76 µs |
-| nimony `std/websocket` | 50 ms | 1,052,192 | 0.047 s | 0.92 µs |
-| Bun, 2000-byte messages | 347 ms | 145,812 | 0.186 s | 3.63 µs |
-| nimony, 2000-byte messages | 308 ms | **163,438** | 0.234 s | 4.57 µs |
+| Bun `Bun.serve` | 185 ms | **281,306** | 0.116 s | 2.26 µs |
+| nimony `std/websocket` | 181 ms | 277,768 | 0.131 s | 2.55 µs |
+| Bun `Bun.serve` | 55 ms | 974,504 | 0.044 s | 0.86 µs |
+| nimony `std/websocket` | 49 ms | **1,078,218** | 0.049 s | 0.95 µs |
+| Bun, 2000-byte messages | 356 ms | 136,070 | 0.187 s | 3.65 µs |
+| nimony, 2000-byte messages | 334 ms | **147,089** | 0.247 s | 4.82 µs |
 
 (upper rows: one client process, lower rows: four; the last two are 2000-byte
 messages, one client process)
@@ -312,10 +306,7 @@ the one measured first. Medians of 3 repetitions, 20 rounds per echo run:
 | echo, 2000-byte messages | 144,247 | **157,427** | 146,012 |
 
 The echo is level: three implementations of the same protocol, within the ±3%
-noise of the box at one client process and within 9% at four. The chat rows of
-the rotation — where the fan-out, not the protocol, is what a server costs —
-belong to the `topictree` branch, which also carries the syscall counts that
-explain them.
+noise of the box at one client process and within 9% at four.
 
 It holds connections as easily as the others: `scripts/run-conns.sh 8192
 ./bin/wtx-echo` opens 8192, echoes 8192 and holds **8192/8192 at 11.8 KB of
@@ -337,25 +328,25 @@ medians):
 
 | connections | server | rate | p50 | p99 | server CPU |
 |---|---|---|---|---|---|
-| 32 | Bun | 181,450 | 161 µs | 440 µs | 0.66 |
-| 32 | nimony | 143,262 | 202 µs | 524 µs | 0.95 |
-| 128 | Bun | 383,858 | 301 µs | 761 µs | 0.98 |
-| 128 | nimony | 283,806 | 395 µs | 1,136 µs | 1.50 |
-| 512 | Bun | 444,844 | 910 µs | 3,783 µs | 0.96 |
-| 512 | nimony | 365,173 | **779 µs** | 6,063 µs | 1.43 |
-| 2048 | Bun | 351,252 | 5,598 µs | 11,444 µs | 0.96 |
-| 2048 | nimony | 284,375 | 6,357 µs | 18,409 µs | 1.43 |
+| 32 | Bun | 163,811 | 171 µs | 515 µs | 0.65 |
+| 32 | nimony | 128,395 | 214 µs | 665 µs | 0.93 |
+| 128 | Bun | 371,229 | 300 µs | 813 µs | 0.97 |
+| 128 | nimony | 278,914 | 399 µs | 1,230 µs | 1.52 |
+| 512 | Bun | 380,491 | 1,197 µs | 3,953 µs | 0.96 |
+| 512 | nimony | 349,928 | **820 µs** | 6,249 µs | 1.44 |
+| 2048 | Bun | 282,010 | 6,793 µs | 15,482 µs | 0.93 |
+| 2048 | nimony | 241,874 | 7,332 µs | 21,973 µs | 1.42 |
 
 Reading it:
 
 * **Every connection is held**: 2048 of 2048 opened, zero errors, both servers.
   nimony's accept loop spawns a task per connection and keeps going.
-* **Rate is 74–82% of Bun's**, and the gap widens with concurrency. This is the
+* **Rate is 75–92% of Bun's**, and the gap widens with concurrency. This is the
   one benchmark where Bun's single event loop wins: one `epoll_wait` collects
   every ready socket and one `sendto` carries ~32 replies, while the ring does
   ~3 `io_uring_enter` per burst of ~19 messages.
-* **Median latency is comparable** — better at 512 connections (779 µs against
-  910 µs) — but the **tail is 1.2–1.6× worse** (p99 6.1 ms against 3.8 ms at
+* **Median latency is comparable** — better at 512 connections (820 µs against
+  1,197 µs) — but the **tail is 1.3–1.6× worse** (p99 6.2 ms against 4.0 ms at
   512). Three workers spread the median; the tail is a worker that was busy.
 * **CPU is 1.4–1.5× Bun's.** At 128 connections nimony spends 1.50 cores to
   Bun's 0.98, and on a 4-core box shared with four client processes that is
@@ -366,10 +357,10 @@ connection per interval, so the server's capacity is never the limit):
 
 | offered rate | server | rate | p50 | p99 | server CPU |
 |---|---|---|---|---|---|
-| 5,120 msg/s | Bun | 5,043 | 3,935 µs | **10,860 µs** | 0.085 |
-| 5,120 msg/s | nimony | **5,069** | **3,595 µs** | 11,511 µs | 0.16 |
-| 51,200 msg/s | Bun | 46,300 | **909 µs** | 5,812 µs | 0.33 |
-| 51,200 msg/s | nimony | **48,619** | 935 µs | **4,906 µs** | 0.52 |
+| 5,120 msg/s | Bun | 5,018 | 4,224 µs | **12,730 µs** | 0.09 |
+| 5,120 msg/s | nimony | **5,069** | **3,596 µs** | 13,561 µs | 0.17 |
+| 51,200 msg/s | Bun | 45,788 | 960 µs | 6,062 µs | 0.33 |
+| 51,200 msg/s | nimony | **48,790** | **929 µs** | **4,744 µs** | 0.54 |
 
 At a fixed load nimony delivers **more**, with a better median at the low rate
 and a **lower 99th percentile** at the high one (4.9 ms against 5.8 ms), and it
@@ -394,7 +385,7 @@ matter what the server can do.
 | Bun `Bun.serve` | 8192 / 8192 | **1.7 KB** | 0.002 cores |
 | wtx (Rust) | 8192 / 8192 | 11.8 KB | 0.000 cores |
 | nimony, before this MR | 8192 / 8192 | 12.0 KB | — |
-| nimony, after | 8192 / 8192 | **9.0 KB** | 0.060 cores |
+| nimony, after | 8192 / 8192 | **9.0 KB** | 0.066 cores |
 
 (Idle CPU is flat in the connection count: it is the pool's periodic wakeup —
 a lane polls every 1 ms — not a per-connection cost.)
@@ -448,7 +439,7 @@ out of ports before either server ran out of anything.
 ## What is left
 
 * **The echo is at parity or ahead; the many-connection rate is not.** The
-  74–82% in the scale table is syscall batching: Bun's event loop collects every
+  75–92% in the scale table is syscall batching: Bun's event loop collects every
   ready socket in one `epoll_wait` and writes ~32 replies per `sendto`, while the
   ring does ~3 `io_uring_enter` per ~19-message burst. `IORING_OP_RECV_MULTISHOT`
   (kernel 6.0+) removes the read re-arm, and submitting a burst's writes without
@@ -457,7 +448,7 @@ out of ports before either server ran out of anything.
   in this change. (In the one-message-in-flight regime there is nothing to batch:
   a multishot recv would save SQE fills, not syscalls — reads are already ~6.5
   per `io_uring_enter` there.)
-* **The tail.** nimony's p99 is 1.2–1.6× Bun's while its median is better at
+* **The tail.** nimony's p99 is 1.3–1.6× Bun's while its median is better at
   512 connections. Three workers each own a lane and only that lane's thread may
   poll it, so a worker inside a long continuation delays every completion on
   its own lane; that is why a larger `trampolineSteps` is not automatically
